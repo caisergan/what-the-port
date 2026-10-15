@@ -3,6 +3,7 @@ import SwiftUI
 struct ServersView: View {
     @ObservedObject var monitor: ServerMonitor
     let openServer: (Server) -> Void
+    var openCaches: () -> Void = {}
     let openSettings: () -> Void
 
     private let maxVisibleRows = 7
@@ -16,9 +17,11 @@ struct ServersView: View {
     @State private var isCleaning: Bool
     @State private var selection: Set<Int> = []
 
-    init(monitor: ServerMonitor, startCleaning: Bool = false, openServer: @escaping (Server) -> Void, openSettings: @escaping () -> Void) {
+    init(monitor: ServerMonitor, startCleaning: Bool = false, openServer: @escaping (Server) -> Void,
+         openCaches: @escaping () -> Void = {}, openSettings: @escaping () -> Void) {
         self.monitor = monitor
         self.openServer = openServer
+        self.openCaches = openCaches
         self.openSettings = openSettings
         _isCleaning = State(initialValue: startCleaning)
         _selection = State(initialValue: startCleaning ? Self.suggestedSelection(monitor) : [])
@@ -215,6 +218,8 @@ struct ServersView: View {
                 .buttonStyle(PillButtonStyle())
                 .disabled(monitor.servers.isEmpty)
 
+                CachesButton(store: monitor.caches, action: openCaches)
+
                 Spacer()
 
                 Button(action: openSettings) {
@@ -254,6 +259,28 @@ struct ServersView: View {
             if case .leaking = candidate.reason { return nil }
             return candidate.server.port
         })
+    }
+}
+
+/// Opens Build caches, with what deleting them all would free.
+private struct CachesButton: View {
+    @ObservedObject var store: BuildCacheStore
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: 7) {
+                Image(systemName: "shippingbox")
+                    .font(.system(size: 11, weight: .medium))
+                Text(L10n.text("Caches"))
+                if store.reclaimable > 0 {
+                    let total = Format.total(store.reclaimable)
+                    Text("\(total.number) \(total.unit)").font(Theme.monoCaption).foregroundStyle(Theme.text2)
+                }
+            }
+        }
+        .buttonStyle(PillButtonStyle())
+        .help(L10n.text("Build caches"))
     }
 }
 
@@ -419,18 +446,22 @@ struct ServerRow: View {
 
 struct Checkbox: View {
     let isOn: Bool
+    /// Some, not all, of what it stands for is selected.
+    var isMixed = false
+    var size: CGFloat = 16
 
     var body: some View {
-        RoundedRectangle(cornerRadius: 5, style: .continuous)
-            .fill(isOn ? Theme.text1 : Theme.fill)
+        let filled = isOn || isMixed
+        RoundedRectangle(cornerRadius: size * 0.31, style: .continuous)
+            .fill(filled ? Theme.text1 : Theme.fill)
             .overlay {
-                if isOn {
-                    Image(systemName: "checkmark").font(.system(size: 9, weight: .bold)).foregroundStyle(Theme.onPrimary)
+                if filled {
+                    Image(systemName: isOn ? "checkmark" : "minus").font(.system(size: size * 0.56, weight: .bold)).foregroundStyle(Theme.onPrimary)
                 } else {
-                    RoundedRectangle(cornerRadius: 5, style: .continuous).strokeBorder(Theme.text3, lineWidth: 1)
+                    RoundedRectangle(cornerRadius: size * 0.31, style: .continuous).strokeBorder(Theme.text3, lineWidth: 1)
                 }
             }
-            .frame(width: 16, height: 16)
+            .frame(width: size, height: size)
     }
 }
 

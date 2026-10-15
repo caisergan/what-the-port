@@ -32,6 +32,13 @@ enum Preferences {
     static let protectedProcesses = "cleanup.protected"
     static let forceQuitSeconds = "cleanup.forceQuitSeconds"
 
+    // Build caches
+    /// Folders to scan. Absent until edited, which means automatic.
+    static let cacheFolders = "caches.folders"
+    /// Folders holding dev servers' projects, learned while scanning servers.
+    static let cacheDetectedFolders = "caches.detectedFolders"
+    static let cacheStaleDays = "caches.staleDays"
+
     // Integrations
     static let linkClaude = "integrations.claude"
     static let linkCodex = "integrations.codex"
@@ -79,6 +86,7 @@ enum Preferences {
             cleanUpRunningDays: 3,
             protectedProcesses: defaultProtected,
             forceQuitSeconds: 3.0,
+            cacheStaleDays: 14,
             linkClaude: true,
             linkCodex: true,
             linkConductor: true,

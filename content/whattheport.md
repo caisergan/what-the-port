@@ -16,6 +16,7 @@
 - **Leak detection.** When a server passes 2 GB of memory or grows more than 500 MB in ten minutes, its memory reading and the menu bar icon turn amber and you get one notification with Details, Stop and Snooze. Thresholds are adjustable.
 - **Resource charts.** Ten minutes of memory and CPU history per server, summed across its own process tree.
 - **Clean up.** Preselects servers from deleted git worktrees or idle for hours, then stops each server’s own process tree in bulk. Postgres, Redis, MongoDB and MySQL are protected by default. Cleanup can be Off, Ask or Automatic; leaking servers are never stopped automatically.
+- **Build caches.** Finds regenerable folders in your projects and their git worktrees: `node_modules`, `.next`, `.turbo`, Rust `target`, SwiftPM `.build`, Xcode `DerivedData` and build folders, Gradle output, CocoaPods `Pods`, Python virtual environments and caches, and anything marked with `CACHEDIR.TAG`. Generic names like `dist` and `build` count only when git ignores them. Each folder shows what deleting it frees, so pnpm `node_modules` cloned from the store count as the little they free. Projects untouched for 14 days are suggested, never ones with a running dev server, and deleting asks for confirmation. Folders to scan are found from where your dev servers run, or set in Settings → Build caches.
 - **Stop and restart.** Stop sends SIGTERM to the server’s own process tree, then SIGKILL after a short delay. Restart reruns the original command in the same folder.
 - **Previews and pull requests (optional).** A Vercel preview button and the branch’s pull request, through the GitHub CLI you’re already signed in to.
 - **Terminal UI.** `wtp` shows the same servers, details and Clean up in your terminal. `wtp list --json` prints them as JSON for scripts and coding agents.
@@ -69,6 +70,10 @@ The prebuilt download is for Apple Silicon Macs on macOS 14 Sonoma or later. You
 ### How is it different from `lsof` or `npx kill-port`?
 
 Those answer one question about one port. WhatThePort keeps every dev server in view all the time, names them by project and branch, shows memory and CPU for the server’s own process tree, warns you about leaks, links servers to the agent session that started them, and stops the whole tree, not just one PID.
+
+### Can it free disk space taken by node_modules and build folders?
+
+Yes. Click Caches in the popover to see every `node_modules`, `.next`, Rust `target`, Xcode build folder and similar cache in your projects and worktrees, sorted by how much deleting it frees. Tick what to delete and confirm. Only folders your tools recreate are listed, and source code is never touched; the next install or build recreates them.
 
 ### Will it stop my database?
 

@@ -20,6 +20,11 @@ const KEYS = [
   'Running for %@', 'Restart with the same command', 'Session', 'Branch', 'Folder', 'Framework', 'Command',
   'Started', 'Workspace', 'Session ID', '%d more', 'Less', 'Memory', '10 min', 'Processes',
   'Open localhost:%@', 'Preview',
+  'Caches', 'Build caches', 'Other', 'Scanning…', 'Scanned just now', 'Scan again', 'Freed %@', '%d %@',
+  'folder', 'folders', 'folders (few)', '%@ · %@. Click to select them all.', 'Server on %@', '%@ worktree',
+  'untouched %@', 'used %@ ago', 'Show folders', '%@ · %d folders', '%@ shared', 'Nothing to clean', 'No build caches in %@',
+  'Select unused', 'Clear', 'Delete caches', 'Free %@', 'Delete %d %@', 'Web builds', 'Python envs', 'Python caches',
+  'Deleted folders are gone for good. Your tools recreate them on the next install or build.',
 ]
 
 const unescape = (value) => value.replace(/\\(.)/g, (_, c) => (c === 'n' ? '\n' : c))

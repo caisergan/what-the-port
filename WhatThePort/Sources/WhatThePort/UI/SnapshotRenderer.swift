@@ -16,11 +16,13 @@ enum SnapshotRenderer {
             RunLoop.current.run(until: Date().addingTimeInterval(1))
         }
         monitor.scanNow()
+        monitor.caches.scanNow(servers: monitor.servers)
 
         let output = URL(fileURLWithPath: directory, isDirectory: true)
         try? FileManager.default.createDirectory(at: output, withIntermediateDirectories: true)
 
-        var pages: [(String, PopoverRoute, Bool)] = [("servers", .servers, false), ("cleanup", .servers, true)]
+        var pages: [(String, PopoverRoute, Bool)] = [("servers", .servers, false), ("cleanup", .servers, true),
+                                                     ("caches", .caches, false), ("caches-confirm", .caches, true)]
         if let first = monitor.servers.first(where: { $0.agent != nil }) ?? monitor.servers.first {
             pages.insert(("detail", .detail(port: first.port), false), at: 1)
         }
@@ -76,6 +78,9 @@ enum SnapshotRenderer {
             if let server = monitor.server(port: port) {
                 ServerDetailView(server: server, monitor: monitor, back: {})
             }
+        case .caches:
+            // The confirm page also opens the largest project, to show its folders.
+            BuildCachesView(monitor: monitor, expandFirst: cleaning, confirm: cleaning, back: {}, openSettings: {})
         }
     }
 

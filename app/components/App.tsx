@@ -6,6 +6,21 @@ import { AMBER, BackIcon, Chevron, ClaudeIcon, CodexIcon, Colon, DotGrid, OpenIc
 import { type AppLanguageCode, type Localizer, localizer } from './languages'
 import { GET_IT, TERMINAL } from './sections'
 import {
+  type Artifact,
+  type Kind,
+  CACHE_PROJECTS,
+  DISK_FREE,
+  DISK_TOTAL,
+  KINDS,
+  formatDisk,
+  formatDiskTotal,
+  isPhrase,
+  isStale,
+  kindColor,
+  reclaimable,
+  suggestedCaches,
+} from './caches'
+import {
   type Agent,
   type Server,
   SERVERS,
@@ -24,7 +39,7 @@ import {
 // A working copy of the WhatThePort popover. Scrolling picks the view for each
 // section; clicking around works like the real app until the next section.
 
-type View = { name: 'list' } | { name: 'detail'; port: string } | { name: 'cleanUp' }
+type View = { name: 'list' } | { name: 'detail'; port: string } | { name: 'cleanUp' } | { name: 'caches' }
 
 const SECTION_VIEWS: View[] = [
   { name: 'list' },
@@ -50,6 +65,9 @@ export function useDemo(section: number) {
   const [direction, setDirection] = useState(1)
   const [open, setOpen] = useState(opensPopover(section))
   const [selected, setSelected] = useState(() => suggested(SERVERS.map((s) => s.port)))
+  // Build caches: what's been "deleted" and what's ticked, by artifact id.
+  const [removedCaches, setRemovedCaches] = useState<string[]>([])
+  const [cacheSelection, setCacheSelection] = useState(() => suggestedCaches([]))
   const previous = useRef(section)
 
   useEffect(() => {
@@ -59,6 +77,7 @@ export function useDemo(section: number) {
     setView(SECTION_VIEWS[section])
     setOpen(opensPopover(section))
     setSelected(suggested(running))
+    setCacheSelection(suggestedCaches(removedCaches))
     // `running` intentionally omitted: stopping a server shouldn't reset the view.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [section])
@@ -95,6 +114,24 @@ export function useDemo(section: number) {
     setSelected((current) => (current.includes(port) ? current.filter((p) => p !== port) : [...current, port]))
   }, [])
 
+  // Ticks every id, or clears them all if they already are, like the app's checkboxes.
+  const toggleCaches = useCallback((ids: string[]) => {
+    setCacheSelection((current) =>
+      ids.every((id) => current.includes(id)) ? current.filter((id) => !ids.includes(id)) : [...current, ...ids.filter((id) => !current.includes(id))],
+    )
+  }, [])
+
+  // Simulated: nothing on the visitor's Mac is touched.
+  const deleteCaches = useCallback((ids: string[]) => {
+    setRemovedCaches((current) => [...current, ...ids])
+    setCacheSelection((current) => current.filter((id) => !ids.includes(id)))
+  }, [])
+
+  const restoreCaches = useCallback(() => {
+    setRemovedCaches([])
+    setCacheSelection(suggestedCaches([]))
+  }, [])
+
   // A detail view for a server that's been stopped falls back to the list.
   const shown: View = view.name === 'detail' && !running.includes(view.port) ? { name: 'list' } : view
 
@@ -109,6 +146,12 @@ export function useDemo(section: number) {
     go,
     stop,
     restartAll,
+    removedCaches,
+    cacheSelection,
+    setCacheSelection,
+    toggleCaches,
+    deleteCaches,
+    restoreCaches,
   }
 }
 
@@ -143,7 +186,9 @@ export function AppPopover({ demo, language = 'en' }: { demo: Demo; language?: A
   const key =
     view.name === 'detail'
       ? `detail-${view.port}`
-      : demo.running.length
+      : view.name === 'caches'
+        ? 'caches'
+        : demo.running.length
         ? view.name === 'cleanUp'
           ? 'list'
           : view.name
@@ -151,6 +196,7 @@ export function AppPopover({ demo, language = 'en' }: { demo: Demo; language?: A
 
   let content: ReactNode
   if (view.name === 'detail') content = <DetailView demo={demo} server={SERVERS.find((s) => s.port === view.port)!} l={l} />
+  else if (view.name === 'caches') content = <CachesView demo={demo} l={l} />
   else content = <ListView demo={demo} l={l} />
 
   return (
@@ -210,6 +256,9 @@ function ListView({ demo, l }: { demo: Demo; l: Localizer }) {
   const total = resources.memory
   const cpu = Math.round(resources.cpu / 8)
   const cleanUpCount = demo.running.filter((s) => s.cleanUp?.suggested).length
+  const cachesLeft = reclaimable(
+    CACHE_PROJECTS.flatMap((p) => p.artifacts).filter((a) => !demo.removedCaches.includes(a.id)),
+  )
   const chosen = demo.running.filter((s) => demo.selected.includes(s.port))
   const freed = serverResources(chosen).memory
   const focusedServer = demo.running.find((s) => s.port === focus)
@@ -482,6 +531,17 @@ function ListView({ demo, l }: { demo: Demo; l: Localizer }) {
             <span className={styles.popTitle}>{l.text('Clean up')}</span>
             {cleanUpCount > 0 && <span className={styles.chipCount}>{cleanUpCount}</span>}
           </button>
+          <button
+            type="button"
+            className={`${styles.chip} ${styles.cachesChip}`}
+            title={l.text('Build caches')}
+            onClick={() => demo.go({ name: 'caches' }, 1)}
+          >
+            <BoxIcon />
+            <span className={styles.popTitle}>{l.text('Caches')}</span>
+            {cachesLeft > 0 && <span className={styles.chipCount}>{formatTotal(cachesLeft)}</span>}
+          </button>
+          <span className={styles.footerSpacer} />
           <svg width="16" height="16" viewBox="0 0 24 24" aria-hidden>
             <path
               d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"
@@ -782,6 +842,347 @@ function DetailView({ demo, server, l }: { demo: Demo; server: Server; l: Locali
           <span />
         </button>
       </div>
+    </>
+  )
+}
+
+function BoxIcon() {
+  return (
+    <svg width="14" height="14" viewBox="0 0 14 14" aria-hidden>
+      <path
+        d="M7 1.6 12.2 4.2v5.6L7 12.4 1.8 9.8V4.2L7 1.6ZM1.8 4.2 7 6.8l5.2-2.6M7 6.8v5.6M4.4 2.9l5.2 2.6"
+        fill="none"
+        stroke="#F5F5F7"
+        strokeWidth="1.15"
+        strokeLinejoin="round"
+      />
+    </svg>
+  )
+}
+
+function Check({ state, small }: { state: 'on' | 'off' | 'mixed'; small?: boolean }) {
+  return (
+    <span className={styles.checkbox} data-checked={state !== 'off'} data-small={small} aria-hidden>
+      <svg width="10" height="10" viewBox="0 0 10 10">
+        <path
+          d={state === 'mixed' ? 'M2.6 5h4.8' : 'M2 5.2 4.1 7.3 8 2.8'}
+          fill="none"
+          stroke="#0B0D12"
+          strokeWidth="1.6"
+          strokeLinecap="round"
+          strokeLinejoin="round"
+        />
+      </svg>
+    </span>
+  )
+}
+
+const checkState = (artifacts: Artifact[], selection: string[]) => {
+  const count = artifacts.filter((a) => selection.includes(a.id)).length
+  return count === 0 ? 'off' : count === artifacts.length ? 'on' : 'mixed'
+}
+
+// Build caches: like BuildCachesView.swift. Deleting is simulated.
+function CachesView({ demo, l }: { demo: Demo; l: Localizer }) {
+  const [focus, setFocus] = useState<Kind | null>(null)
+  const [hoveredRow, setHoveredRow] = useState<string | null>(null)
+  const [expanded, setExpanded] = useState<string[]>([])
+  const [confirming, setConfirming] = useState(false)
+  const [freed, setFreed] = useState<number | null>(null)
+  const [scanning, setScanning] = useState(false)
+  const timer = useRef<ReturnType<typeof setTimeout>>()
+  useEffect(() => () => clearTimeout(timer.current), [])
+
+  const label = (kind: Kind) => (isPhrase(kind) ? l.text(kind) : kind)
+  const projects = CACHE_PROJECTS.map((p) => ({ ...p, artifacts: p.artifacts.filter((a) => !demo.removedCaches.includes(a.id)) }))
+    .filter((p) => p.artifacts.length)
+    .sort((a, b) => reclaimable(b.artifacts) - reclaimable(a.artifacts))
+  const artifacts = projects.flatMap((p) => p.artifacts)
+  const total = reclaimable(artifacts)
+  const removedMb = reclaimable(CACHE_PROJECTS.flatMap((p) => p.artifacts).filter((a) => demo.removedCaches.includes(a.id)))
+  const free = DISK_FREE + removedMb
+  const other = DISK_TOTAL - free - total
+  const kinds = KINDS.map((kind) => ({ kind, mb: reclaimable(artifacts.filter((a) => a.kind === kind)) }))
+    .filter((k) => k.mb > 0)
+    .sort((a, b) => b.mb - a.mb)
+  const selected = artifacts.filter((a) => demo.cacheSelection.includes(a.id))
+  const selectedMb = reclaimable(selected)
+  const selectedFolders = selected.reduce((sum, a) => sum + (a.count ?? 1), 0)
+  const suggestion = suggestedCaches(demo.removedCaches)
+  const lit = hoveredRow ? new Set(projects.find((p) => p.name === hoveredRow)?.artifacts.map((a) => a.kind)) : null
+  const [value, unit] = formatTotal(focus ? reclaimable(artifacts.filter((a) => a.kind === focus)) : total).split(' ')
+  const focusCount = focus ? artifacts.filter((a) => a.kind === focus).length : 0
+
+  const rescan = () => {
+    setScanning(true)
+    setFreed(null)
+    clearTimeout(timer.current)
+    timer.current = setTimeout(() => setScanning(false), 1200)
+  }
+  const confirmDelete = () => {
+    demo.deleteCaches(selected.map((a) => a.id))
+    setFreed(selectedMb)
+    setConfirming(false)
+    clearTimeout(timer.current)
+    timer.current = setTimeout(() => setFreed(null), 4000)
+  }
+
+  return (
+    <>
+      <div className={styles.popHead}>
+        {focus ? (
+          <div className={styles.popTitleRow}>
+            <span className={styles.kindTitle}>
+              <i style={{ background: kindColor(focus) }} />
+              <span className={styles.popTitle}>{label(focus)}</span>
+            </span>
+          </div>
+        ) : (
+          <Header title={l.text('Build caches')} onBack={() => demo.go({ name: 'list' }, -1)} backLabel={l.text('Back')} />
+        )}
+        <div className={styles.popDisplay}>
+          <span className={styles.popBig}>{value}</span>
+          <span className={styles.popUnit}>{unit}</span>
+          <span className={styles.summaryDetail}>
+            {focus ? (
+              <span className={styles.t2}>{l.format('%d %@', focusCount, l.counted('folder', 'folders', focusCount))}</span>
+            ) : scanning ? (
+              <span className={styles.t2}>{l.text('Scanning…')}</span>
+            ) : freed !== null ? (
+              <span className={styles.t2}>✓ {l.format('Freed %@', formatDisk(freed))}</span>
+            ) : (
+              <button type="button" className={styles.cpuToggle} onClick={rescan} title={l.text('Scan again')}>
+                <span className={styles.t3}>{l.text('Scanned just now')}</span>
+                <svg width="11" height="11" viewBox="0 0 12 12" aria-hidden>
+                  <path
+                    d="M10 6a4 4 0 1 1-1.2-2.85M10 1.8v2.6H7.4"
+                    fill="none"
+                    stroke="rgb(235 235 245 / 60%)"
+                    strokeWidth="1.3"
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                  />
+                </svg>
+              </button>
+            )}
+          </span>
+        </div>
+        <div className={styles.shareBar} aria-label="Disk usage">
+          {kinds.map(({ kind, mb }) => (
+            <button
+              key={kind}
+              type="button"
+              className={styles.memorySegment}
+              style={{ flexGrow: mb, color: kindColor(kind) }}
+              data-raised
+              data-focused={focus === kind}
+              data-dim={(focus !== null && focus !== kind) || (lit !== null && !lit.has(kind))}
+              aria-label={l.format('%@ · %@. Click to select them all.', label(kind), formatDisk(mb))}
+              title={l.format('%@ · %@. Click to select them all.', label(kind), formatDisk(mb))}
+              onMouseEnter={() => setFocus(kind)}
+              onMouseLeave={() => setFocus(null)}
+              onFocus={() => setFocus(kind)}
+              onBlur={() => setFocus(null)}
+              onClick={() => demo.toggleCaches(artifacts.filter((a) => a.kind === kind).map((a) => a.id))}
+            />
+          ))}
+          <span
+            className={styles.memorySegment}
+            style={{ flexGrow: other }}
+            title={l.format('Everything else · %@', formatDiskTotal(other))}
+          />
+          <span className={styles.freeMemory} style={{ flexGrow: free }} title={l.format('Free · %@', formatDiskTotal(free))} />
+        </div>
+        <div className={styles.memoryLegend}>
+          <span>
+            <i data-servers />
+            {l.text('Caches')} <b>{formatTotal(total)}</b>
+          </span>
+          <span className={styles.legendShrink}>
+            <i />
+            {l.text('Other')} <b>{formatDiskTotal(other)}</b>
+          </span>
+          <span>
+            <i data-free />
+            {l.text('Free')} <b>{l.format('%@ of %@', formatDiskTotal(free).split(' ')[0], formatDiskTotal(DISK_TOTAL))}</b>
+          </span>
+        </div>
+      </div>
+
+      <div className={`${styles.popSection} ${styles.rowList} ${styles.cacheList}`}>
+        {!projects.length && (
+          <div className={styles.emptyState}>
+            <DotGrid size={48} />
+            <span className={styles.t2}>{l.text('Nothing to clean')}</span>
+            <span className={`${styles.caption} ${styles.t3}`}>{l.format('No build caches in %@', '~/Code')}</span>
+          </div>
+        )}
+        {projects.map((project) => {
+          const open = expanded.includes(project.name)
+          const kindTotals = KINDS.map((kind) => ({ kind, mb: reclaimable(project.artifacts.filter((a) => a.kind === kind)) }))
+            .filter((k) => project.artifacts.some((a) => a.kind === k.kind))
+            .sort((a, b) => b.mb - a.mb)
+            .map((k) => label(k.kind))
+          const kindText = kindTotals.length > 3 ? `${kindTotals.slice(0, 2).join(', ')} +${kindTotals.length - 2}` : kindTotals.join(', ')
+          const age = isStale(project)
+            ? l.format('untouched %@', l.duration(project.lastUsed, true))
+            : l.format('used %@ ago', l.duration(project.lastUsed, true))
+          const toggle = () => demo.toggleCaches(project.artifacts.map((a) => a.id))
+          return (
+            <div
+              key={project.name}
+              className={styles.cacheProject}
+              data-dim={focus !== null && !project.artifacts.some((a) => a.kind === focus)}
+              onMouseEnter={() => setHoveredRow(project.name)}
+              onMouseLeave={() => setHoveredRow(null)}
+            >
+              <div
+                role="button"
+                tabIndex={0}
+                className={styles.serverRow}
+                data-interactive
+                aria-pressed={checkState(project.artifacts, demo.cacheSelection) === 'on'}
+                aria-label={`Select caches in ${project.name}`}
+                onClick={toggle}
+                onKeyDown={(e) => {
+                  if (e.target === e.currentTarget && (e.key === 'Enter' || e.key === ' ')) {
+                    e.preventDefault()
+                    toggle()
+                  }
+                }}
+              >
+                <Check state={checkState(project.artifacts, demo.cacheSelection)} />
+                <span className={styles.rowMain}>
+                  <span className={styles.rowName} title={project.name}>
+                    {project.name}
+                  </span>
+                  <span className={styles.rowSub} style={{ color: '#EBEBF599' }}>
+                    {project.port && (
+                      <>
+                        <span className={styles.cacheServer}>⚡︎ {l.format('Server on %@', `:${project.port}`)}</span>
+                        <span>·</span>
+                      </>
+                    )}
+                    <span className={styles.ellipsis}>
+                      {project.repository ? `${l.format('%@ worktree', project.repository)} · ` : ''}
+                      {kindText}
+                    </span>
+                    <span>·</span>
+                    <span className={styles.cacheAge}>{age}</span>
+                  </span>
+                </span>
+                <span className={styles.rowMemory}>{formatDisk(reclaimable(project.artifacts))}</span>
+                <button
+                  type="button"
+                  className={styles.cacheChevron}
+                  data-open={open}
+                  aria-expanded={open}
+                  aria-label={l.text(open ? 'Less' : 'Show folders')}
+                  title={l.text(open ? 'Less' : 'Show folders')}
+                  onClick={(e) => {
+                    e.stopPropagation()
+                    setExpanded((current) => (open ? current.filter((n) => n !== project.name) : [...current, project.name]))
+                  }}
+                >
+                  <Chevron direction="down" />
+                </button>
+              </div>
+              <div className={styles.collapsible} data-open={open}>
+                <div>
+                  {[...project.artifacts]
+                    .sort((a, b) => b.reclaimable - a.reclaimable)
+                    .map((a) => (
+                      <div
+                        key={a.id}
+                        role="button"
+                        tabIndex={open ? 0 : -1}
+                        className={styles.cacheGroup}
+                        onClick={() => demo.toggleCaches([a.id])}
+                        onKeyDown={(e) => {
+                          if (e.key === 'Enter' || e.key === ' ') {
+                            e.preventDefault()
+                            demo.toggleCaches([a.id])
+                          }
+                        }}
+                      >
+                        <Check state={checkState([a], demo.cacheSelection)} small />
+                        <span className={`${styles.mono} ${styles.ellipsis}`}>
+                          {a.count ? l.format('%@ · %d folders', a.path, a.count) : a.path}
+                        </span>
+                        {a.size > a.reclaimable * 2 && (
+                          <span className={styles.t3}>{l.format('%@ shared', formatDisk(a.size - a.reclaimable))}</span>
+                        )}
+                        <span className={`${styles.mono} ${styles.t2} ${styles.cacheGroupSize}`}>{formatDisk(a.reclaimable)}</span>
+                      </div>
+                    ))}
+                </div>
+              </div>
+            </div>
+          )
+        })}
+      </div>
+
+      {!projects.length ? (
+        <div className={`${styles.popSection} ${styles.actions}`}>
+          <button type="button" className={styles.primaryAction} onClick={demo.restoreCaches}>
+            Bring the demo caches back
+          </button>
+        </div>
+      ) : confirming ? (
+        <div className={`${styles.popSection} ${styles.cleanFooter}`}>
+          <span className={`${styles.caption} ${styles.t2}`}>
+            {l.text('Deleted folders are gone for good. Your tools recreate them on the next install or build.')}
+          </span>
+          <div className={styles.cacheActions}>
+            <button type="button" className={styles.secondaryAction} onClick={() => setConfirming(false)}>
+              {l.text('Cancel')}
+            </button>
+            <button type="button" className={`${styles.primaryAction} ${styles.destructive}`} onClick={confirmDelete}>
+              {l.format('Delete %d %@', selectedFolders, l.counted('folder', 'folders', selectedFolders))}
+            </button>
+          </div>
+        </div>
+      ) : (
+        <div className={`${styles.popSection} ${styles.actions}`}>
+          {selected.length ? (
+            <button type="button" className={styles.secondaryAction} onClick={() => demo.setCacheSelection([])}>
+              {l.text('Clear')}
+            </button>
+          ) : (
+            <button
+              type="button"
+              className={styles.secondaryAction}
+              disabled={!suggestion.length}
+              onClick={() => demo.setCacheSelection(suggestion)}
+            >
+              {l.text('Select unused')}
+            </button>
+          )}
+          <button
+            type="button"
+            className={`${styles.primaryAction} ${styles.destructive}`}
+            disabled={!selected.length}
+            onClick={() => setConfirming(true)}
+          >
+            <svg width="13" height="13" viewBox="0 0 14 14" aria-hidden style={{ marginInlineEnd: 7 }}>
+              <path
+                d="M2.5 3.8h9M5.6 3.8V2.4h2.8v1.4M3.6 3.8l.6 7.6c0 .5.4.8.9.8h3.8c.5 0 .9-.3.9-.8l.6-7.6"
+                fill="none"
+                stroke="#FFFFFF"
+                strokeWidth="1.2"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+              />
+            </svg>
+            {selected.length ? l.format('Free %@', formatDisk(selectedMb)) : l.text('Delete caches')}
+          </button>
+          <button type="button" className={styles.moreAction} aria-label="More">
+            <span />
+            <span />
+            <span />
+          </button>
+        </div>
+      )}
     </>
   )
 }

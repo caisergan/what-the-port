@@ -126,6 +126,11 @@ enum Format {
         return "\(parts.number) \(parts.unit)"
     }
 
+    /// Folder sizes, where a few kilobytes shouldn't read as "0 MB".
+    static func diskBytes(_ value: UInt64) -> String {
+        value > 0 && Double(value) < megabyte / 2 ? "<1 MB" : bytesString(value)
+    }
+
     /// Compact total for the header: "4.9 GB" or "612 MB".
     static func total(_ value: UInt64) -> (number: String, unit: String) {
         let mb = Double(value) / Format.megabyte
