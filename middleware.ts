@@ -19,6 +19,8 @@ const FEATURES = new Set([
   'resume-session',
   'vercel-preview',
   'pull-request',
+  'build-caches',
+  'delete-caches',
 ])
 
 // Agents can read any page as Markdown (app/md): add .md to its URL, or ask

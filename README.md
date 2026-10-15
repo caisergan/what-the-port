@@ -34,6 +34,12 @@ Choose **Off**, **Ask**, or **Automatic** cleanup in Settings. Leaking servers a
 
 ![Marketing demo of Clean up with idle and deleted-worktree servers selected for removal](docs/images/clean-up.jpg)
 
+### Clears out build caches
+
+**Caches** lists the `node_modules`, `.next`, Rust `target`, SwiftPM `.build`, Xcode build folders, Python environments and other regenerable folders in your projects and their worktrees, with what deleting each one would actually free. Folders that pnpm clones from its store share their disk space, so they count for what they free, not what they appear to use. Projects untouched for 14 days are suggested; projects with a running dev server never are. Deleting asks for confirmation and never touches source code.
+
+![Marketing demo of Build caches with unused projects selected and a disk bar by kind of cache](docs/images/build-caches.jpg)
+
 *Screenshots from the [marketing site’s interactive demo](https://whattheport.dev), using sample server data.*
 
 ## Get started
@@ -51,6 +57,7 @@ The prebuilt download is for **Apple Silicon Macs running macOS 14 or later**. T
 - **Resource charts** - 10 minutes of memory and CPU history per server, summed across its own process tree
 - **Leak detection** - Servers over 2 GB, or growing fast, turn amber in the list and the menu bar
 - **Clean up** - Find servers from deleted worktrees or that have gone idle, and stop them in bulk
+- **Build caches** - Find `node_modules`, build output and caches across your projects and worktrees, see what each frees, and delete the ones you pick
 - **Stop and restart** - Stops the server’s own process tree; restart reruns the original command in the same folder
 - **Alerts** - Notifications with Details, Stop and Snooze when a server passes your memory threshold or starts leaking
 - **Automatic clean up (optional)** - Off, Ask or Automatic; leaking servers are never stopped automatically
@@ -67,6 +74,7 @@ WhatThePort lives in the menu bar as a small dot grid. Click it to see every ser
 - Hover a row to open it in the browser or stop it
 - Click a row for details: session, branch, folder, command, charts and processes
 - Click **Clean up** to tick the servers you want gone and stop them together
+- Click **Caches** to see build output and dependencies in your projects, tick what to delete and free the space
 
 Right-click the dot grid to open a server in the browser, open Settings, check for updates, send feedback or quit.
 
@@ -110,6 +118,7 @@ Open Settings from the gear in the popover (⌘,):
 - **General** - Language, launch at login, menu bar icon style, editor, global shortcut, the `wtp` terminal command, scan interval, anonymous usage sharing
 - **Alerts** - Memory threshold, leak warnings, snooze length, start/stop notifications
 - **Clean up** - Off / Ask / Automatic, what counts as idle or stale, protected processes, force-quit delay
+- **Build caches** - Folders to scan (found automatically from where your dev servers run) and how long a project must be untouched to be suggested
 - **Ports & processes** - Port range and which processes count as dev servers
 - **Integrations** - Claude Code, Codex, Conductor and Pane session links, branch names, Vercel previews and pull requests
 - **About** - Version, update controls, bug reports or feature requests as GitHub issues with your app and macOS versions filled in, and a tip jar
@@ -117,6 +126,8 @@ Open Settings from the gear in the popover (⌘,):
 ## How It Works
 
 WhatThePort reads listening TCP sockets with `lsof`, then inspects each server's process tree directly through `libproc` and `sysctl`: memory footprint, CPU time, working directory, arguments and environment. From the working directory it finds the project manifest, framework and git branch. Session links come from environment variables that Claude Code and Conductor pass to the commands they run, and from Codex's session files. It rescans every 2 seconds. In monorepos, sibling servers stay separate from their shared task runner. When one process serves several ports, each row shows its server’s usage; totals count each process once, and the memory bar divides shared usage between those ports. Stopping or restarting that process affects all ports it serves.
+
+**Build caches** walk your project folders with `getattrlistbulk`, stopping at each artifact rather than listing its contents, and size them on a few threads. APFS reports how much of each file is shared with clones, so a pnpm `node_modules` counts for the space deleting it frees. Only folders that tools recreate count: known names like `node_modules`, `.next` and `__pycache__`, `target` and `.build` beside their manifests, and folders marked with `CACHEDIR.TAG`. Generic names like `dist` and `build` count only when git ignores them. Unchanged folders keep their last size, so routine rescans take seconds; results are kept on disk. Before deleting, each folder is checked again: still a real folder inside a scanned folder, still an artifact, with no repository of its own.
 
 ## Privacy
 

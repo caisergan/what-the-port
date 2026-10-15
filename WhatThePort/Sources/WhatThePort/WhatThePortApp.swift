@@ -34,6 +34,8 @@ struct WhatThePortApp: App {
         HotKey.shared.setEnabled(UserDefaults.standard.bool(forKey: Preferences.hotkey))
         monitor.start()
         Usage.start()
+        // Once the servers are up, refresh a day-old build cache scan in the background.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 30) { monitor.caches.scanIfStale(maxAge: 86_400) }
     }
 
     var body: some Scene {

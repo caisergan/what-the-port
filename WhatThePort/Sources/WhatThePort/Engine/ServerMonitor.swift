@@ -21,6 +21,8 @@ final class ServerMonitor: ObservableObject {
     @Published var allowlist: Set<String> = ServerMonitor.defaultAllowlist
     /// Set from outside the popover (e.g. a notification's Details button).
     @Published var pendingRoute: PopoverRoute?
+    /// Settings opens on this pane next time, e.g. from the Build caches page.
+    @Published var pendingSettingsPane: SettingsPane?
 
     /// Off in the `wtp` terminal UI, so it never duplicates the menu bar app's
     /// notifications or automatic clean up.
@@ -45,6 +47,7 @@ final class ServerMonitor: ObservableObject {
     ]
 
     let github = GitHubLookup()
+    let caches = BuildCacheStore()
     private let engine = ScanEngine()
     private let appUsage = AppUsageScanner()
     private let cpuSampler = SystemCPUSampler()
@@ -132,6 +135,7 @@ final class ServerMonitor: ObservableObject {
                 self.otherApps = apps
                 self.hasScanned = true
                 self.isScanning = false
+                self.caches.learnFolders(from: result)
                 if self.handlesAlerts {
                     AlertCenter.shared.evaluate(result, threshold: self.alertThreshold)
                     self.handleCleanUp()

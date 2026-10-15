@@ -21,6 +21,8 @@ enum Usage {
         case resumeSession = "resume-session"
         case vercelPreview = "vercel-preview"
         case pullRequest = "pull-request"
+        case buildCaches = "build-caches"
+        case deleteCaches = "delete-caches"
     }
 
     private static let pendingKey = "usage.pending"

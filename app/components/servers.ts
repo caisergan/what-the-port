@@ -212,7 +212,7 @@ export function stoppedPorts(servers: Server[], selected: string[]) {
 }
 
 // Stable identities: stopping a server must not recolor the remaining ports.
-const PORT_COLORS = ['#6EC7ED', '#B599F0', '#EB9CD4', '#7D9CF2', '#7DDBE0', '#D9A3F2', '#ABC2E0']
+export const PORT_COLORS = ['#6EC7ED', '#B599F0', '#EB9CD4', '#7D9CF2', '#7DDBE0', '#D9A3F2', '#ABC2E0']
 export const portColor = (port: string) =>
   PORT_COLORS[
     Math.max(

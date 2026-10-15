@@ -3,6 +3,7 @@ import SwiftUI
 enum PopoverRoute: Equatable {
     case servers
     case detail(port: Int)
+    case caches
 }
 
 struct PopoverRoot: View {
@@ -20,8 +21,15 @@ struct PopoverRoot: View {
                 ServersView(monitor: monitor,
                             startCleaning: startCleaning,
                             openServer: { server in navigate(to: .detail(port: server.port)) },
+                            openCaches: { navigate(to: .caches) },
                             openSettings: openSettings)
                     .transition(.move(edge: .leading).combined(with: .opacity))
+            case .caches:
+                BuildCachesView(monitor: monitor, back: { navigate(to: .servers) }, openSettings: {
+                    monitor.pendingSettingsPane = .caches
+                    openSettings()
+                })
+                .transition(.move(edge: .trailing).combined(with: .opacity))
             case .detail(let port):
                 if let server = monitor.server(port: port) {
                     ServerDetailView(server: server, monitor: monitor, back: { navigate(to: .servers) })
@@ -51,6 +59,7 @@ struct PopoverRoot: View {
 
     private func navigate(to newRoute: PopoverRoute) {
         if case .detail = newRoute { Usage.record(.details) }
+        if newRoute == .caches { Usage.record(.buildCaches) }
         withAnimation(.snappy(duration: 0.22)) { route = newRoute }
     }
 

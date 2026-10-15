@@ -5,6 +5,7 @@ enum SettingsPane: String, CaseIterable, Identifiable {
     case general = "General"
     case alerts = "Alerts"
     case cleanUp = "Clean up"
+    case caches = "Build caches"
     case ports = "Ports & processes"
     case integrations = "Integrations"
     case about = "About"
@@ -16,6 +17,7 @@ enum SettingsPane: String, CaseIterable, Identifiable {
         case .general: return .colon
         case .alerts: return .alert
         case .cleanUp: return DotGlyph(rows: ["....#", "...##", ".#.##", ".####", "#####"])
+        case .caches: return DotGlyph(rows: ["#####", "#...#", "#####", "#...#", "#####"])
         case .ports: return DotGlyph(rows: ["####.", "#...#", "####.", "#....", "#...."])
         case .integrations: return .prompt
         case .about: return .question
@@ -48,6 +50,7 @@ struct SettingsView: View {
                 case .general: GeneralPane()
                 case .alerts: AlertsPane()
                 case .cleanUp: CleanUpPane()
+                case .caches: BuildCachesPane(store: monitor.caches)
                 case .ports: PortsPane(monitor: monitor)
                 case .integrations: IntegrationsPane()
                 case .about: AboutPane()
@@ -58,6 +61,14 @@ struct SettingsView: View {
             .navigationTitle(L10n.text(pane?.rawValue ?? "Settings"))
         }
         .frame(width: 740, height: 560)
+        .onAppear(perform: consumePendingPane)
+        .onChange(of: monitor.pendingSettingsPane) { _, _ in consumePendingPane() }
+    }
+
+    private func consumePendingPane() {
+        guard let pending = monitor.pendingSettingsPane else { return }
+        monitor.pendingSettingsPane = nil
+        pane = pending
     }
 }
 
@@ -279,6 +290,79 @@ private struct CleanUpPane: View {
                 }
             }
         }
+    }
+}
+
+// MARK: - Build caches
+
+private struct BuildCachesPane: View {
+    @ObservedObject var store: BuildCacheStore
+    @AppStorage(Preferences.cacheStaleDays) private var staleDays = 14
+
+    var body: some View {
+        Form {
+            Section {
+                ForEach(store.folders, id: \.self) { folder in
+                    HStack(spacing: 8) {
+                        Image(systemName: "folder").foregroundStyle(.secondary)
+                        Text((folder as NSString).abbreviatingWithTildeInPath)
+                            .font(Theme.mono)
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                            .help(folder)
+                        Spacer()
+                        Button {
+                            store.removeFolder(folder)
+                        } label: {
+                            Image(systemName: "xmark").font(.system(size: 9, weight: .bold)).foregroundStyle(.secondary)
+                        }
+                        .buttonStyle(.plain)
+                        .help(L10n.text("Remove"))
+                    }
+                }
+                HStack {
+                    Button(L10n.text("Add Folder…"), action: addFolder)
+                    if !store.isAutomatic {
+                        Button(L10n.text("Use detected folders"), action: store.useAutomaticFolders)
+                    }
+                    Spacer()
+                }
+            } header: {
+                Text(L10n.text("Folders"))
+            } footer: {
+                Text(store.isAutomatic
+                     ? L10n.text("Found automatically: the usual project folders and wherever your dev servers run. Worktrees inside them are included.")
+                     : L10n.text("Projects and worktrees inside these folders are scanned."))
+                    .font(Theme.caption)
+                    .foregroundStyle(.secondary)
+            }
+            Section {
+                Picker(selection: $staleDays) {
+                    ForEach([7, 14, 30, 90], id: \.self) { Text(L10n.format("%d days", $0)).tag($0) }
+                } label: {
+                    SettingLabel(L10n.text("Suggest projects untouched for"), caption: L10n.text("Projects with a running dev server are skipped"))
+                }
+            } header: {
+                Text(L10n.text("Suggestions"))
+            }
+            Section {
+                Text(L10n.text("Only folders your tools recreate are listed: dependencies like node_modules, build output like .next, target and DerivedData, and caches marked with CACHEDIR.TAG. Generic names like dist and build count only when git ignores them. Source code is never touched."))
+                    .font(Theme.caption)
+                    .foregroundStyle(.secondary)
+            } header: {
+                Text(L10n.text("What counts"))
+            }
+        }
+    }
+
+    private func addFolder() {
+        let panel = NSOpenPanel()
+        panel.canChooseDirectories = true
+        panel.canChooseFiles = false
+        panel.allowsMultipleSelection = true
+        panel.prompt = L10n.text("Add")
+        guard panel.runModal() == .OK else { return }
+        panel.urls.forEach { store.addFolder($0.path) }
     }
 }
 

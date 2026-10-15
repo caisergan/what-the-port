@@ -58,6 +58,10 @@ enum L10n {
         return Bundle.module
     }()
 
+    /// Flat bundles keep .lproj folders at the top; newer SwiftPM builds put
+    /// them in Contents/Resources, which `resourceURL` covers in both cases.
+    static var resourceDirectory: URL { resourceBundle.resourceURL ?? resourceBundle.bundleURL }
+
     private static let bundles: [InterfaceLanguage: Bundle] = {
         var result: [InterfaceLanguage: Bundle] = [:]
         for language in InterfaceLanguage.allCases where language != .system {
@@ -65,7 +69,7 @@ enum L10n {
             // declared spelling rather than relying on filesystem case rules.
             if let name = resourceBundle.localizations.first(where: {
                 $0.caseInsensitiveCompare(language.rawValue) == .orderedSame
-            }), let bundle = Bundle(url: resourceBundle.bundleURL.appendingPathComponent("\(name).lproj")) {
+            }), let bundle = Bundle(url: resourceDirectory.appendingPathComponent("\(name).lproj")) {
                 result[language] = bundle
             }
         }

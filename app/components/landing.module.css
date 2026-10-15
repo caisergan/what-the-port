@@ -1896,3 +1896,52 @@
 .view[dir='rtl'] :is(.rowMemory, .mono, .memoryLegend b) { unicode-bidi: plaintext; }
 .view[dir='rtl'] .rowMemory { text-align: left; }
 .view[dir='rtl'] .chart { direction: ltr; }
+
+/* Build caches (BuildCachesView.swift) */
+.popFooter { gap: 8px; }
+.footerSpacer { flex: 1 1 0; }
+.cachesChip svg { flex-shrink: 0; }
+.kindTitle { display: flex; align-items: center; gap: 6px; }
+.kindTitle i { width: 6px; height: 6px; border-radius: 3px; }
+.legendShrink { min-width: 0; overflow: hidden; }
+.cacheList { max-height: 300px; overflow-y: auto; }
+.cacheProject { border-radius: 9px; transition: opacity 0.12s ease; }
+.cacheProject:hover { background-color: #ffffff14; }
+.cacheProject[data-dim='true'] { opacity: 0.35; }
+.cacheProject .serverRow { padding-inline-end: 4px; }
+.cacheProject .serverRow[data-interactive]:hover { background-color: transparent; }
+.cacheProject .serverRow > .checkbox { margin-inline-end: 12px; }
+.cacheServer { flex-shrink: 0; color: #ffb224; }
+.cacheAge { flex-shrink: 0; }
+.popover .cacheChevron {
+  width: 22px;
+  height: 22px;
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 6px;
+}
+.popover .cacheChevron:hover { background-color: #ffffff1f; }
+.cacheChevron svg { transition: transform 0.2s ease; }
+.cacheChevron[data-open='true'] svg { transform: rotate(180deg); }
+.cacheGroup {
+  height: 24px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding-inline: 38px 30px;
+  font-size: 11px;
+  line-height: 14px;
+  direction: ltr;
+  cursor: default;
+}
+.cacheGroup:last-child { margin-bottom: 6px; }
+.cacheGroup .t3 { flex-shrink: 0; margin-inline-start: auto; }
+.cacheGroupSize { width: 64px; flex-shrink: 0; margin-inline-start: auto; text-align: end; }
+.cacheGroup .t3 + .cacheGroupSize { margin-inline-start: 0; }
+.checkbox[data-small='true'] { width: 12px; height: 12px; border-radius: 4px; }
+.checkbox[data-small='true'] svg { width: 8px; height: 8px; }
+.cacheActions { display: flex; gap: 8px; }
+.popover .actions .destructive { align-items: center; }
+.popover .secondaryAction:disabled { opacity: 0.5; }

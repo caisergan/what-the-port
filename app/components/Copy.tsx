@@ -122,6 +122,10 @@ export function SectionCopy({ index, stars }: { index: number; stars: number | n
             Clean up selects servers from deleted worktrees or idle for hours. Tick the ones to go and WhatThePort stops
             each server’s own process tree, keeping sibling servers separate. Postgres and Redis are protected by default.
           </p>
+          <p className={styles.body}>
+            Caches does the same for disk: <span className={styles.inlineMono}>node_modules</span>, build output and
+            caches across your projects and worktrees, with what each actually frees.
+          </p>
         </div>
       )
     case 4:
