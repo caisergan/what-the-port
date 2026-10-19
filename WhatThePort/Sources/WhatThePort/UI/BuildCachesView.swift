@@ -21,10 +21,12 @@ struct BuildCachesView: View {
     /// Suggestions are made once, from the first results there are.
     @State private var hasSuggested: Bool
     @State private var disk = DiskSpace.current()
+    private let expandQueue: Bool
 
-    /// Snapshot mode passes `expandFirst` and `confirm` to render those states.
-    init(monitor: ServerMonitor, expandFirst: Bool = false, confirm: Bool = false,
+    /// Snapshot mode passes `expandFirst`, `confirm` and `expandQueue` to render those states.
+    init(monitor: ServerMonitor, expandFirst: Bool = false, confirm: Bool = false, expandQueue: Bool = false,
          back: @escaping () -> Void, openSettings: @escaping () -> Void) {
+        self.expandQueue = expandQueue
         self.monitor = monitor
         self.store = monitor.caches
         self.back = back
@@ -62,7 +64,7 @@ struct BuildCachesView: View {
                 selection = Self.suggestedSelection(monitor)
             }
         }
-        .onChange(of: store.freeing) { _, _ in disk = DiskSpace.current() }
+        .onChange(of: store.cleanup?.finished) { _, _ in disk = DiskSpace.current() }
     }
 
     private var artifacts: [BuildArtifact] { store.projects.flatMap(\.artifacts) }
@@ -100,8 +102,14 @@ struct BuildCachesView: View {
             }
             .frame(height: 16)
             CacheLegend(store: store, disk: disk)
+            if let cleanup = store.cleanup {
+                CleanupCard(cleanup: cleanup, isExpanded: expandQueue, cancel: store.cancelQueued)
+                    .padding(.top, 4)
+                    .transition(.opacity)
+            }
         }
         .padding(EdgeInsets(top: 12, leading: Theme.inset, bottom: 16, trailing: Theme.inset))
+        .animation(.snappy(duration: 0.25), value: store.cleanup == nil)
     }
 
     @ViewBuilder private var summaryDetail: some View {
@@ -109,6 +117,14 @@ struct BuildCachesView: View {
             let count = artifacts.filter { $0.kind == focus }.count
             Text(L10n.format("%d %@", count, L10n.counted("folder", "folders", count: count)))
                 .font(Theme.body).foregroundStyle(Theme.text2)
+        } else if let cleanup = store.cleanup, !cleanup.isFinished {
+            HStack(spacing: 7) {
+                ProgressRing(fraction: cleanup.progress)
+                Text(L10n.format("Freed %@ of %@", Format.diskBytes(cleanup.freed), Format.diskBytes(cleanup.total)))
+                    .font(Theme.body).foregroundStyle(Theme.text2)
+                    .contentTransition(.numericText())
+                    .animation(.snappy(duration: 0.2), value: cleanup.freed)
+            }
         } else if let progress = store.progress {
             HStack(spacing: 6) {
                 ProgressView().controlSize(.mini)
@@ -116,15 +132,10 @@ struct BuildCachesView: View {
                     .font(Theme.body).foregroundStyle(Theme.text2)
                     .contentTransition(.numericText())
             }
-        } else if store.freeing > 0 {
-            HStack(spacing: 6) {
-                ProgressView().controlSize(.mini)
-                Text(L10n.format("Freeing %@…", Format.diskBytes(store.freeing))).font(Theme.body).foregroundStyle(Theme.text2)
-            }
-        } else if let freed = store.freed {
+        } else if let cleanup = store.cleanup {
             HStack(spacing: 5) {
                 Image(systemName: "checkmark").font(.system(size: 10, weight: .semibold))
-                Text(L10n.format("Freed %@", Format.diskBytes(freed)))
+                Text(L10n.format("Freed %@", Format.diskBytes(cleanup.freed)))
             }
             .font(Theme.body).foregroundStyle(Theme.text2)
         } else if let scannedAt = store.scannedAt {
@@ -497,6 +508,176 @@ struct CacheProjectRow: View {
         guard size > reclaimable + 1_048_576 else { return L10n.format("Frees %@", Format.diskBytes(reclaimable)) }
         return L10n.format("Frees %@ of %@ on disk. The rest is shared with copies elsewhere, like the pnpm store.",
                            Format.diskBytes(reclaimable), Format.diskBytes(size))
+    }
+}
+
+// MARK: - Cleanup
+
+/// The deletion queue under the disk bar: the folder being deleted and how
+/// many are left, expanding to every folder in the queue.
+struct CleanupCard: View {
+    let cleanup: BuildCacheStore.Cleanup
+    let cancel: () -> Void
+    @State private var isExpanded: Bool
+    @State private var isHovered = false
+
+    init(cleanup: BuildCacheStore.Cleanup, isExpanded: Bool = false, cancel: @escaping () -> Void) {
+        self.cleanup = cleanup
+        self.cancel = cancel
+        _isExpanded = State(initialValue: isExpanded)
+    }
+
+    private let maxVisibleJobs = 6
+    private let jobHeight: CGFloat = 24
+
+    var body: some View {
+        VStack(spacing: 0) {
+            Button {
+                withAnimation(.snappy(duration: 0.2)) { isExpanded.toggle() }
+            } label: {
+                HStack(spacing: 8) {
+                    headline
+                    Spacer(minLength: 8)
+                    Text(countText)
+                        .font(Theme.monoCaption).foregroundStyle(Theme.text3)
+                        .fixedSize()
+                        .contentTransition(.numericText())
+                    Image(systemName: isExpanded ? "chevron.up" : "chevron.down")
+                        .font(.system(size: 9, weight: .bold))
+                        .foregroundStyle(Theme.text3)
+                        .frame(width: 12)
+                }
+                .padding(.horizontal, 10)
+                .frame(height: 34)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .help(isExpanded ? L10n.text("Less") : L10n.text("Show folders"))
+
+            if isExpanded {
+                SectionDivider().padding(.horizontal, 10)
+                Group {
+                    if cleanup.jobs.count > maxVisibleJobs {
+                        ScrollView { jobs }.frame(height: CGFloat(maxVisibleJobs) * jobHeight + 8)
+                    } else {
+                        jobs
+                    }
+                }
+                if cleanup.queued > 0 {
+                    HStack {
+                        Spacer()
+                        Button {
+                            withAnimation(.snappy(duration: 0.2)) { cancel() }
+                        } label: {
+                            Text(L10n.format("Cancel %d queued", cleanup.queued))
+                                .font(Theme.caption).foregroundStyle(Theme.text1)
+                                .padding(.horizontal, 10)
+                                .frame(height: 22)
+                                .background(Theme.fill, in: RoundedRectangle(cornerRadius: 6, style: .continuous))
+                                .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
+                        .help(L10n.text("Puts the folders that haven't started back in the list."))
+                    }
+                    .padding(EdgeInsets(top: 2, leading: 10, bottom: 10, trailing: 10))
+                }
+            }
+        }
+        .background(isHovered && !isExpanded ? Theme.fill : Theme.subtleFill,
+                    in: RoundedRectangle(cornerRadius: 9, style: .continuous))
+        .onHover { isHovered = $0 }
+        .animation(.snappy(duration: 0.2), value: cleanup.jobs.map(\.state))
+    }
+
+    @ViewBuilder private var headline: some View {
+        if let job = cleanup.current {
+            HStack(spacing: 8) {
+                ProgressView().controlSize(.mini).frame(width: 12)
+                jobLabel(job)
+            }
+        } else if cleanup.isFinished {
+            HStack(spacing: 8) {
+                Image(systemName: "checkmark").font(.system(size: 10, weight: .semibold)).foregroundStyle(Theme.text2).frame(width: 12)
+                Text(L10n.format("Freed %@", Format.diskBytes(cleanup.freed))).font(Theme.body).foregroundStyle(Theme.text1)
+                if cleanup.failed > 0 {
+                    Text(L10n.format("%d kept", cleanup.failed))
+                        .font(Theme.caption).foregroundStyle(Theme.amber)
+                        .help(L10n.text("Changed since the scan, so it was kept."))
+                }
+            }
+        }
+    }
+
+    private var countText: String {
+        if cleanup.isFinished {
+            let count = cleanup.jobs.count - cleanup.failed
+            return L10n.format("%d %@", count, L10n.counted("folder", "folders", count: count))
+        }
+        return L10n.format("%d of %d", min(cleanup.finished + 1, cleanup.jobs.count), cleanup.jobs.count)
+    }
+
+    private func jobLabel(_ job: BuildCacheStore.CleanupJob) -> some View {
+        HStack(spacing: 6) {
+            Text(job.project.relativePath(of: job.artifact))
+                .font(Theme.monoCaption).foregroundStyle(Theme.text1.opacity(0.85))
+                .lineLimit(1).truncationMode(.middle)
+                .layoutPriority(1)
+            Text(job.project.name)
+                .font(Theme.caption).foregroundStyle(Theme.text3)
+                .lineLimit(1).truncationMode(.tail)
+        }
+        .help(job.artifact.path)
+        .environment(\.layoutDirection, .leftToRight)
+    }
+
+    private var jobs: some View {
+        VStack(spacing: 0) {
+            ForEach(cleanup.jobs) { job in
+                HStack(spacing: 8) {
+                    icon(job.state).frame(width: 12)
+                    jobLabel(job)
+                    Spacer(minLength: 8)
+                    Text(Format.diskBytes(job.artifact.reclaimable))
+                        .font(Theme.monoCaption).foregroundStyle(Theme.text2)
+                        .fixedSize()
+                }
+                .frame(height: jobHeight)
+                .opacity(job.state == .done ? 0.55 : 1)
+            }
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 4)
+    }
+
+    @ViewBuilder private func icon(_ state: BuildCacheStore.CleanupJob.State) -> some View {
+        switch state {
+        case .queued:
+            Circle().strokeBorder(Theme.text3, style: StrokeStyle(lineWidth: 1, dash: [2, 2])).frame(width: 10, height: 10)
+        case .deleting:
+            ProgressView().controlSize(.mini)
+        case .done:
+            Image(systemName: "checkmark").font(.system(size: 9, weight: .semibold)).foregroundStyle(Theme.text2)
+        case .failed:
+            Image(systemName: "exclamationmark.triangle.fill").font(.system(size: 9)).foregroundStyle(Theme.amber)
+                .help(L10n.text("Changed since the scan, so it was kept."))
+        }
+    }
+}
+
+/// How much of the queue is done, by bytes.
+struct ProgressRing: View {
+    let fraction: Double
+
+    var body: some View {
+        ZStack {
+            Circle().stroke(Theme.text1.opacity(0.15), lineWidth: 2)
+            Circle()
+                .trim(from: 0, to: max(fraction, 0.03))
+                .stroke(Theme.text1.opacity(0.8), style: StrokeStyle(lineWidth: 2, lineCap: .round))
+                .rotationEffect(.degrees(-90))
+        }
+        .frame(width: 12, height: 12)
+        .animation(.easeOut(duration: 0.25), value: fraction)
     }
 }
 

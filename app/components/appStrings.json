@@ -86,7 +86,11 @@
     "Web builds": "Web-Builds",
     "Python envs": "Python-Umgebungen",
     "Python caches": "Python-Caches",
-    "Deleted folders are gone for good. Your tools recreate them on the next install or build.": "Gelöschte Ordner sind endgültig weg. Deine Tools erstellen sie bei der nächsten Installation oder beim nächsten Build neu."
+    "Deleted folders are gone for good. Your tools recreate them on the next install or build.": "Gelöschte Ordner sind endgültig weg. Deine Tools erstellen sie bei der nächsten Installation oder beim nächsten Build neu.",
+    "Freed %@ of %@": "%@ von %@ freigegeben",
+    "%d of %d": "%d von %d",
+    "Cancel %d queued": "%d in der Warteschlange abbrechen",
+    "Puts the folders that haven't started back in the list.": "Legt Ordner, die noch nicht begonnen haben, zurück in die Liste."
   },
   "fr": {
     "Servers": "Serveurs",
@@ -175,7 +179,11 @@
     "Web builds": "Builds web",
     "Python envs": "Environnements Python",
     "Python caches": "Caches Python",
-    "Deleted folders are gone for good. Your tools recreate them on the next install or build.": "Les dossiers supprimés le sont définitivement. Vos outils les recréent à la prochaine installation ou compilation."
+    "Deleted folders are gone for good. Your tools recreate them on the next install or build.": "Les dossiers supprimés le sont définitivement. Vos outils les recréent à la prochaine installation ou compilation.",
+    "Freed %@ of %@": "%@ sur %@ libérés",
+    "%d of %d": "%d sur %d",
+    "Cancel %d queued": "Annuler les %d en attente",
+    "Puts the folders that haven't started back in the list.": "Remet dans la liste les dossiers pas encore commencés."
   },
   "es": {
     "Servers": "Servidores",
@@ -264,7 +272,11 @@
     "Web builds": "Builds web",
     "Python envs": "Entornos de Python",
     "Python caches": "Cachés de Python",
-    "Deleted folders are gone for good. Your tools recreate them on the next install or build.": "Las carpetas eliminadas desaparecen para siempre. Tus herramientas las vuelven a crear en la próxima instalación o compilación."
+    "Deleted folders are gone for good. Your tools recreate them on the next install or build.": "Las carpetas eliminadas desaparecen para siempre. Tus herramientas las vuelven a crear en la próxima instalación o compilación.",
+    "Freed %@ of %@": "%@ de %@ liberados",
+    "%d of %d": "%d de %d",
+    "Cancel %d queued": "Cancelar %d en cola",
+    "Puts the folders that haven't started back in the list.": "Devuelve a la lista las carpetas que aún no han empezado."
   },
   "zh-Hans": {
     "Servers": "服务器",
@@ -353,7 +365,11 @@
     "Web builds": "Web 构建",
     "Python envs": "Python 环境",
     "Python caches": "Python 缓存",
-    "Deleted folders are gone for good. Your tools recreate them on the next install or build.": "删除的文件夹无法恢复。你的工具会在下次安装或构建时重新生成它们。"
+    "Deleted folders are gone for good. Your tools recreate them on the next install or build.": "删除的文件夹无法恢复。你的工具会在下次安装或构建时重新生成它们。",
+    "Freed %@ of %@": "已释放 %@ / %@",
+    "%d of %d": "%d/%d",
+    "Cancel %d queued": "取消 %d 个排队项",
+    "Puts the folders that haven't started back in the list.": "将尚未开始的文件夹放回列表。"
   },
   "he": {
     "Servers": "שרתים",
@@ -442,7 +458,11 @@
     "Web builds": "בניות Web",
     "Python envs": "סביבות Python",
     "Python caches": "מטמוני Python",
-    "Deleted folders are gone for good. Your tools recreate them on the next install or build.": "תיקיות שנמחקו נעלמות לצמיתות. הכלים שלך ייצרו אותן מחדש בהתקנה או בבנייה הבאה."
+    "Deleted folders are gone for good. Your tools recreate them on the next install or build.": "תיקיות שנמחקו נעלמות לצמיתות. הכלים שלך ייצרו אותן מחדש בהתקנה או בבנייה הבאה.",
+    "Freed %@ of %@": "פונו %@ מתוך %@",
+    "%d of %d": "%d מתוך %d",
+    "Cancel %d queued": "ביטול %d בתור",
+    "Puts the folders that haven't started back in the list.": "מחזיר לרשימה תיקיות שעוד לא התחילו."
   },
   "ja": {
     "Servers": "サーバー",
@@ -531,7 +551,11 @@
     "Web builds": "Web ビルド",
     "Python envs": "Python 環境",
     "Python caches": "Python キャッシュ",
-    "Deleted folders are gone for good. Your tools recreate them on the next install or build.": "削除したフォルダは元に戻せません。次回のインストールやビルドでツールが再作成します。"
+    "Deleted folders are gone for good. Your tools recreate them on the next install or build.": "削除したフォルダは元に戻せません。次回のインストールやビルドでツールが再作成します。",
+    "Freed %@ of %@": "%2$@ 中 %1$@ を解放",
+    "%d of %d": "%d/%d",
+    "Cancel %d queued": "待機中の %d 件をキャンセル",
+    "Puts the folders that haven't started back in the list.": "まだ始まっていないフォルダをリストに戻します。"
   },
   "uk": {
     "Servers": "Сервери",
@@ -620,6 +644,10 @@
     "Web builds": "Веб-збірки",
     "Python envs": "Середовища Python",
     "Python caches": "Кеші Python",
-    "Deleted folders are gone for good. Your tools recreate them on the next install or build.": "Видалені папки не відновити. Ваші інструменти створять їх знову під час наступного встановлення чи збірки."
+    "Deleted folders are gone for good. Your tools recreate them on the next install or build.": "Видалені папки не відновити. Ваші інструменти створять їх знову під час наступного встановлення чи збірки.",
+    "Freed %@ of %@": "Звільнено %@ із %@",
+    "%d of %d": "%d з %d",
+    "Cancel %d queued": "Скасувати %d у черзі",
+    "Puts the folders that haven't started back in the list.": "Повертає до списку теки, які ще не почали видалятися."
   }
 }

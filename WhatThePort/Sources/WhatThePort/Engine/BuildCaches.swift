@@ -335,18 +335,45 @@ enum BuildCacheScanner {
     /// Deletes an artifact for good. The folder is first renamed into a
     /// temporary folder on the same volume, so it disappears instantly and a
     /// half-finished delete never leaves a broken folder in the project.
-    static func remove(_ artifact: BuildArtifact, roots: [String]) -> Bool {
+    /// `progress` reports the share deleted, one call at a time.
+    static func remove(_ artifact: BuildArtifact, roots: [String], progress: (Double) -> Void = { _ in }) -> Bool {
         guard isStillArtifact(artifact, roots: roots) else { return false }
         let fileManager = FileManager.default
         let url = URL(fileURLWithPath: artifact.path)
         if let staging = try? fileManager.url(for: .itemReplacementDirectory, in: .userDomainMask, appropriateFor: url, create: true) {
-            if (try? fileManager.moveItem(at: url, to: staging.appendingPathComponent(url.lastPathComponent))) != nil {
+            let staged = staging.appendingPathComponent(url.lastPathComponent)
+            if (try? fileManager.moveItem(at: url, to: staged)) != nil {
+                removeContents(of: staged.path, progress: progress)
                 try? fileManager.removeItem(at: staging)
                 return true
             }
             try? fileManager.removeItem(at: staging)
         }
         return (try? fileManager.removeItem(at: url)) != nil
+    }
+
+    /// Deletes a folder's contents a piece at a time, several in parallel.
+    /// Folders like `target` hold a few huge subfolders, so those are split
+    /// a level or two further to keep the progress moving.
+    private static func removeContents(of path: String, progress: (Double) -> Void) {
+        var pieces = [path]
+        for _ in 0..<3 where pieces.count < 64 {
+            pieces = pieces.flatMap { piece -> [String] in
+                var info = stat()
+                guard lstat(piece, &info) == 0, (info.st_mode & S_IFMT) == S_IFDIR,
+                      let names = try? FileManager.default.contentsOfDirectory(atPath: piece), !names.isEmpty else { return [piece] }
+                return names.map { piece + "/" + $0 }
+            }
+        }
+        let lock = NSLock()
+        var removed = 0
+        DispatchQueue.concurrentPerform(iterations: pieces.count) { index in
+            try? FileManager.default.removeItem(atPath: pieces[index])
+            lock.lock()
+            removed += 1
+            progress(Double(removed) / Double(pieces.count))
+            lock.unlock()
+        }
     }
 
     /// Re-checks right before deleting: still a real folder (not a symlink)

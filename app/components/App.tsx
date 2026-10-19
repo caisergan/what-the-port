@@ -39,6 +39,11 @@ import {
 // A working copy of the WhatThePort popover. Scrolling picks the view for each
 // section; clicking around works like the real app until the next section.
 
+// A folder in the Build caches deletion queue (BuildCacheStore.CleanupJob).
+export type CacheJob = { id: string; state: 'queued' | 'deleting' | 'done' }
+const CACHE_ARTIFACTS = CACHE_PROJECTS.flatMap((p) => p.artifacts)
+const cacheSize = (id: string) => CACHE_ARTIFACTS.find((a) => a.id === id)?.reclaimable ?? 0
+
 type View = { name: 'list' } | { name: 'detail'; port: string } | { name: 'cleanUp' } | { name: 'caches' }
 
 const SECTION_VIEWS: View[] = [
@@ -68,6 +73,9 @@ export function useDemo(section: number) {
   // Build caches: what's been "deleted" and what's ticked, by artifact id.
   const [removedCaches, setRemovedCaches] = useState<string[]>([])
   const [cacheSelection, setCacheSelection] = useState(() => suggestedCaches([]))
+  // The simulated deletion queue and how far its current folder has got (0–1).
+  const [cacheJobs, setCacheJobs] = useState<CacheJob[]>([])
+  const [cacheFraction, setCacheFraction] = useState(0)
   const previous = useRef(section)
 
   useEffect(() => {
@@ -121,16 +129,63 @@ export function useDemo(section: number) {
     )
   }, [])
 
-  // Simulated: nothing on the visitor's Mac is touched.
+  // Simulated: nothing on the visitor's Mac is touched. Like the app, the
+  // folders leave the list at once and are deleted one at a time.
   const deleteCaches = useCallback((ids: string[]) => {
     setRemovedCaches((current) => [...current, ...ids])
     setCacheSelection((current) => current.filter((id) => !ids.includes(id)))
+    setCacheJobs((current) => {
+      // A finished queue still on screen makes way for the new one.
+      const kept = current.every((job) => job.state === 'done') ? [] : current
+      const jobs = [...kept, ...ids.map((id): CacheJob => ({ id, state: 'queued' }))]
+      if (!jobs.some((job) => job.state === 'deleting')) {
+        const next = jobs.findIndex((job) => job.state === 'queued')
+        jobs[next] = { ...jobs[next], state: 'deleting' }
+      }
+      return jobs
+    })
   }, [])
+
+  // Folders that haven't started go back in the list.
+  const cancelQueuedCaches = useCallback(() => {
+    const queued = cacheJobs.filter((job) => job.state === 'queued').map((job) => job.id)
+    setCacheJobs((current) => current.filter((job) => job.state !== 'queued'))
+    setRemovedCaches((current) => current.filter((id) => !queued.includes(id)))
+  }, [cacheJobs])
 
   const restoreCaches = useCallback(() => {
     setRemovedCaches([])
     setCacheSelection(suggestedCaches([]))
+    setCacheJobs([])
   }, [])
+
+  // Works through the queue: about a second and a half per gigabyte.
+  const deleting = cacheJobs.find((job) => job.state === 'deleting')?.id
+  const finished = cacheJobs.length > 0 && cacheJobs.every((job) => job.state === 'done')
+  useEffect(() => {
+    if (!deleting) return
+    const step = 100 / Math.max(500, (cacheSize(deleting) / 1024) * 1500)
+    const timer = setInterval(() => setCacheFraction((fraction) => Math.min(fraction + step, 1)), 100)
+    return () => clearInterval(timer)
+  }, [deleting])
+
+  useEffect(() => {
+    if (!deleting || cacheFraction < 1) return
+    setCacheJobs((current) => {
+      const jobs = current.map((job): CacheJob => (job.id === deleting ? { ...job, state: 'done' } : job))
+      const next = jobs.findIndex((job) => job.state === 'queued')
+      if (next >= 0) jobs[next] = { ...jobs[next], state: 'deleting' }
+      return jobs
+    })
+    setCacheFraction(0)
+  }, [deleting, cacheFraction])
+
+  // The result stays up for a moment, as in the app.
+  useEffect(() => {
+    if (!finished) return
+    const timer = setTimeout(() => setCacheJobs([]), 6000)
+    return () => clearTimeout(timer)
+  }, [finished])
 
   // A detail view for a server that's been stopped falls back to the list.
   const shown: View = view.name === 'detail' && !running.includes(view.port) ? { name: 'list' } : view
@@ -152,6 +207,9 @@ export function useDemo(section: number) {
     toggleCaches,
     deleteCaches,
     restoreCaches,
+    cacheJobs,
+    cacheFraction,
+    cancelQueuedCaches,
   }
 }
 
@@ -888,19 +946,28 @@ function CachesView({ demo, l }: { demo: Demo; l: Localizer }) {
   const [hoveredRow, setHoveredRow] = useState<string | null>(null)
   const [expanded, setExpanded] = useState<string[]>([])
   const [confirming, setConfirming] = useState(false)
-  const [freed, setFreed] = useState<number | null>(null)
   const [scanning, setScanning] = useState(false)
   const timer = useRef<ReturnType<typeof setTimeout>>()
   useEffect(() => () => clearTimeout(timer.current), [])
 
   const label = (kind: Kind) => (isPhrase(kind) ? l.text(kind) : kind)
-  const projects = CACHE_PROJECTS.map((p) => ({ ...p, artifacts: p.artifacts.filter((a) => !demo.removedCaches.includes(a.id)) }))
+  const projects = CACHE_PROJECTS.map((p) => ({
+    ...p,
+    artifacts: p.artifacts.filter((a) => !demo.removedCaches.includes(a.id)).sort((a, b) => b.reclaimable - a.reclaimable),
+  }))
     .filter((p) => p.artifacts.length)
     .sort((a, b) => reclaimable(b.artifacts) - reclaimable(a.artifacts))
   const artifacts = projects.flatMap((p) => p.artifacts)
   const total = reclaimable(artifacts)
   const removedMb = reclaimable(CACHE_PROJECTS.flatMap((p) => p.artifacts).filter((a) => demo.removedCaches.includes(a.id)))
-  const free = DISK_FREE + removedMb
+  const jobs = demo.cacheJobs
+  const jobMb = (state: CacheJob['state']) => reclaimable(CACHE_ARTIFACTS.filter((a) => jobs.some((j) => j.id === a.id && j.state === state)))
+  const deletingMb = jobMb('deleting')
+  const running = jobs.some((j) => j.state !== 'done')
+  const freedMb = jobMb('done') + deletingMb * demo.cacheFraction
+  const queueMb = jobMb('done') + deletingMb + jobMb('queued')
+  // Like the app, free space grows as each folder finishes.
+  const free = DISK_FREE + removedMb - deletingMb - jobMb('queued')
   const other = DISK_TOTAL - free - total
   const kinds = KINDS.map((kind) => ({ kind, mb: reclaimable(artifacts.filter((a) => a.kind === kind)) }))
     .filter((k) => k.mb > 0)
@@ -915,16 +982,12 @@ function CachesView({ demo, l }: { demo: Demo; l: Localizer }) {
 
   const rescan = () => {
     setScanning(true)
-    setFreed(null)
     clearTimeout(timer.current)
     timer.current = setTimeout(() => setScanning(false), 1200)
   }
   const confirmDelete = () => {
     demo.deleteCaches(selected.map((a) => a.id))
-    setFreed(selectedMb)
     setConfirming(false)
-    clearTimeout(timer.current)
-    timer.current = setTimeout(() => setFreed(null), 4000)
   }
 
   return (
@@ -946,10 +1009,15 @@ function CachesView({ demo, l }: { demo: Demo; l: Localizer }) {
           <span className={styles.summaryDetail}>
             {focus ? (
               <span className={styles.t2}>{l.format('%d %@', focusCount, l.counted('folder', 'folders', focusCount))}</span>
+            ) : running ? (
+              <span className={`${styles.cleanupStatus} ${styles.t2}`}>
+                <ProgressRing fraction={queueMb ? freedMb / queueMb : 0} />
+                {l.format('Freed %@ of %@', formatDisk(freedMb), formatDisk(queueMb))}
+              </span>
             ) : scanning ? (
               <span className={styles.t2}>{l.text('Scanning…')}</span>
-            ) : freed !== null ? (
-              <span className={styles.t2}>✓ {l.format('Freed %@', formatDisk(freed))}</span>
+            ) : jobs.length ? (
+              <span className={styles.t2}>✓ {l.format('Freed %@', formatDisk(freedMb))}</span>
             ) : (
               <button type="button" className={styles.cpuToggle} onClick={rescan} title={l.text('Scan again')}>
                 <span className={styles.t3}>{l.text('Scanned just now')}</span>
@@ -1007,6 +1075,7 @@ function CachesView({ demo, l }: { demo: Demo; l: Localizer }) {
             {l.text('Free')} <b>{l.format('%@ of %@', formatDiskTotal(free).split(' ')[0], formatDiskTotal(DISK_TOTAL))}</b>
           </span>
         </div>
+        {jobs.length > 0 && <CleanupCard demo={demo} l={l} freedMb={freedMb} />}
       </div>
 
       <div className={`${styles.popSection} ${styles.rowList} ${styles.cacheList}`}>
@@ -1184,6 +1253,133 @@ function CachesView({ demo, l }: { demo: Demo; l: Localizer }) {
         </div>
       )}
     </>
+  )
+}
+
+// The deletion queue under the disk bar (CleanupCard in BuildCachesView.swift).
+function CleanupCard({ demo, l, freedMb }: { demo: Demo; l: Localizer; freedMb: number }) {
+  const [open, setOpen] = useState(false)
+  const jobs = demo.cacheJobs
+  const current = jobs.find((j) => j.state === 'deleting')
+  const done = jobs.filter((j) => j.state === 'done').length
+  const queued = jobs.filter((j) => j.state === 'queued').length
+  const finished = done === jobs.length
+  const count = finished
+    ? l.format('%d %@', jobs.length, l.counted('folder', 'folders', jobs.length))
+    : l.format('%d of %d', Math.min(done + 1, jobs.length), jobs.length)
+  const label = (id: string) => {
+    const project = CACHE_PROJECTS.find((p) => p.artifacts.some((a) => a.id === id))!
+    const a = project.artifacts.find((a) => a.id === id)!
+    return (
+      <span className={styles.cleanupLabel}>
+        <span className={`${styles.mono} ${styles.ellipsis}`}>{a.count ? l.format('%@ · %d folders', a.path, a.count) : a.path}</span>
+        <span className={`${styles.t3} ${styles.ellipsis}`}>{project.name}</span>
+      </span>
+    )
+  }
+  return (
+    <div className={styles.cleanupCard} data-open={open}>
+      <button
+        type="button"
+        className={styles.cleanupHead}
+        aria-expanded={open}
+        title={l.text(open ? 'Less' : 'Show folders')}
+        onClick={() => setOpen(!open)}
+      >
+        {current ? (
+          <>
+            <Spinner />
+            {label(current.id)}
+          </>
+        ) : (
+          <>
+            <JobIcon state="done" />
+            <span className={styles.cleanupLabel}>{l.format('Freed %@', formatDisk(freedMb))}</span>
+          </>
+        )}
+        <span className={`${styles.mono} ${styles.t3} ${styles.cleanupCount}`}>{count}</span>
+        <span className={styles.cacheChevron} data-open={open}>
+          <Chevron direction="down" />
+        </span>
+      </button>
+      <div className={styles.collapsible} data-open={open}>
+        <div>
+          <div className={styles.cleanupJobs}>
+            {jobs.map((job) => (
+              <div key={job.id} className={styles.cleanupJob} data-state={job.state}>
+                {job.state === 'deleting' ? <Spinner /> : <JobIcon state={job.state} />}
+                {label(job.id)}
+                <span className={`${styles.mono} ${styles.t2}`}>{formatDisk(cacheSize(job.id))}</span>
+              </div>
+            ))}
+          </div>
+          {queued > 0 && (
+            <button
+              type="button"
+              className={styles.cleanupCancel}
+              tabIndex={open ? 0 : -1}
+              title={l.text("Puts the folders that haven't started back in the list.")}
+              onClick={demo.cancelQueuedCaches}
+            >
+              {l.format('Cancel %d queued', queued)}
+            </button>
+          )}
+        </div>
+      </div>
+    </div>
+  )
+}
+
+// How much of the queue is done, by size (ProgressRing).
+function ProgressRing({ fraction }: { fraction: number }) {
+  const length = 2 * Math.PI * 5
+  return (
+    <svg className={styles.progressRing} width="12" height="12" viewBox="0 0 12 12" aria-hidden>
+      <circle cx="6" cy="6" r="5" fill="none" stroke="#f5f5f726" strokeWidth="2" />
+      <circle
+        cx="6"
+        cy="6"
+        r="5"
+        fill="none"
+        stroke="#f5f5f7cc"
+        strokeWidth="2"
+        strokeLinecap="round"
+        strokeDasharray={length}
+        strokeDashoffset={length * (1 - Math.max(fraction, 0.03))}
+        transform="rotate(-90 6 6)"
+      />
+    </svg>
+  )
+}
+
+// macOS's small indeterminate spinner.
+function Spinner() {
+  return (
+    <svg className={styles.spinner} width="12" height="12" viewBox="0 0 12 12" aria-hidden>
+      {Array.from({ length: 8 }, (_, i) => (
+        <path
+          key={i}
+          d="M6 1.2v2.2"
+          stroke="#ebebf5"
+          strokeWidth="1.3"
+          strokeLinecap="round"
+          opacity={0.25 + (i / 8) * 0.6}
+          transform={`rotate(${i * 45} 6 6)`}
+        />
+      ))}
+    </svg>
+  )
+}
+
+function JobIcon({ state }: { state: 'queued' | 'done' }) {
+  return state === 'done' ? (
+    <svg className={styles.jobIcon} width="12" height="12" viewBox="0 0 12 12" aria-hidden>
+      <path d="M3 6.3l2 2 4-4.6" fill="none" stroke="#ebebf599" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  ) : (
+    <svg className={styles.jobIcon} width="12" height="12" viewBox="0 0 12 12" aria-hidden>
+      <circle cx="6" cy="6" r="4.5" fill="none" stroke="#ebebf566" strokeWidth="1" strokeDasharray="2 2" />
+    </svg>
   )
 }
 

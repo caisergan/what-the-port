@@ -1,8 +1,8 @@
 import Foundation
 
 /// The last build-cache scan, kept on disk so the page opens instantly.
-/// Rescans run in the background; deleting is optimistic and frees space
-/// in the background.
+/// Rescans run in the background; deleting is optimistic and works through
+/// a queue in the background.
 @MainActor
 final class BuildCacheStore: ObservableObject {
     struct Progress: Equatable {
@@ -15,17 +15,16 @@ final class BuildCacheStore: ObservableObject {
     /// The folders the last scan covered; a different list means it's out of date.
     private var scannedFolders: [String] = []
     @Published private(set) var progress: Progress?
-    /// Bytes still being deleted in the background.
-    @Published private(set) var freeing: UInt64 = 0
-    /// What the last delete freed, shown briefly in the footer.
-    @Published private(set) var freed: UInt64?
+    /// The deletion queue, kept briefly after it finishes to show what it freed.
+    @Published private(set) var cleanup: Cleanup?
 
     var isScanning: Bool { progress != nil }
     var reclaimable: UInt64 { projects.reduce(0) { $0 + $1.reclaimable } }
 
     private let queue = DispatchQueue(label: "com.whattheport.caches", qos: .utility)
     private var learnedRoots = Set<String>()
-    private var freedReset: DispatchWorkItem?
+    private let deleteQueue = DispatchQueue(label: "com.whattheport.caches.delete", qos: .utility)
+    private var cleanupReset: DispatchWorkItem?
 
     nonisolated private static let fileURL: URL = {
         let support = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
@@ -187,11 +186,11 @@ final class BuildCacheStore: ObservableObject {
                 DispatchQueue.main.async {
                     guard self.progress != nil else { return }
                     self.progress = Progress(measured: count, total: total)
-                    if let partial { self.projects = partial }
+                    if let partial { self.projects = self.withoutPending(partial) }
                 }
             }
             DispatchQueue.main.async {
-                self.projects = result
+                self.projects = self.withoutPending(result)
                 self.scannedAt = Date()
                 self.scannedFolders = roots
                 self.progress = nil
@@ -211,43 +210,141 @@ final class BuildCacheStore: ObservableObject {
 
     // MARK: - Deleting
 
-    /// Removes the artifacts from the list right away, then deletes them in
-    /// the background. Anything that fails its safety re-check stays on disk,
-    /// and a rescan brings it back.
+    /// A folder waiting to be deleted, being deleted, or done.
+    struct CleanupJob: Identifiable, Equatable {
+        enum State { case queued, deleting, done, failed }
+        let artifact: BuildArtifact
+        /// The project it came from, to put it back if the job is cancelled.
+        let project: CacheProject
+        var state = State.queued
+
+        var id: String { artifact.path }
+    }
+
+    /// Everything deleted since the page last went quiet, in queue order.
+    struct Cleanup: Equatable {
+        var jobs: [CleanupJob] = []
+        /// How far the folder being deleted has got, 0–1.
+        var fraction: Double = 0
+
+        var total: UInt64 { jobs.reduce(0) { $0 + $1.artifact.reclaimable } }
+        /// Bytes freed so far, including part of the folder being deleted.
+        var freed: UInt64 {
+            jobs.reduce(0) { sum, job in
+                switch job.state {
+                case .done: sum + job.artifact.reclaimable
+                case .deleting: sum + UInt64(Double(job.artifact.reclaimable) * fraction)
+                case .queued, .failed: sum
+                }
+            }
+        }
+        var progress: Double { total == 0 ? (isFinished ? 1 : 0) : min(Double(freed) / Double(total), 1) }
+        var current: CleanupJob? { jobs.first { $0.state == .deleting } }
+        var queued: Int { jobs.filter { $0.state == .queued }.count }
+        var finished: Int { jobs.filter { $0.state == .done || $0.state == .failed }.count }
+        var failed: Int { jobs.filter { $0.state == .failed }.count }
+        var isFinished: Bool { finished == jobs.count }
+    }
+
+    /// Takes the artifacts off the list right away and queues them, largest
+    /// first. Folders are deleted one at a time in the background, so picking
+    /// more while it runs adds to the queue. Anything that fails its safety
+    /// re-check stays on disk, and a rescan brings it back.
     func delete(_ paths: Set<String>) {
-        let artifacts = projects.flatMap(\.artifacts).filter { paths.contains($0.path) }
-        guard !artifacts.isEmpty else { return }
-        let roots = folders
-        let bytes = artifacts.reduce(0) { $0 + $1.reclaimable }
+        let jobs = projects.flatMap { project in
+            project.artifacts.filter { paths.contains($0.path) }.map { CleanupJob(artifact: $0, project: project) }
+        }
+        guard !jobs.isEmpty else { return }
         for index in projects.indices { projects[index].artifacts.removeAll { paths.contains($0.path) } }
         projects.removeAll { $0.artifacts.isEmpty }
         projects.sort { $0.reclaimable > $1.reclaimable }
-        freeing += bytes
-        freed = nil
+        cleanupReset?.cancel()
+        // A finished cleanup still on screen makes way for the new one.
+        if cleanup?.isFinished ?? true { cleanup = Cleanup() }
+        cleanup?.jobs += jobs
         save()
-        DispatchQueue.global(qos: .utility).async {
-            let lock = NSLock()
-            var failed = 0
-            var removed: UInt64 = 0
-            DispatchQueue.concurrentPerform(iterations: artifacts.count) { index in
-                let ok = BuildCacheScanner.remove(artifacts[index], roots: roots)
-                lock.lock()
-                if ok { removed += artifacts[index].reclaimable } else { failed += 1 }
-                lock.unlock()
+        deleteNext()
+    }
+
+    /// Snapshot mode: a queue part-way through, without deleting anything.
+    func previewCleanup() {
+        let jobs = projects.prefix(4).flatMap { project in project.artifacts.prefix(2).map { CleanupJob(artifact: $0, project: project) } }
+        guard jobs.count > 2 else { return }
+        let paths = Set(jobs.map(\.id))
+        for index in projects.indices { projects[index].artifacts.removeAll { paths.contains($0.path) } }
+        projects.removeAll { $0.artifacts.isEmpty }
+        var cleanup = Cleanup(jobs: jobs, fraction: 0.4)
+        cleanup.jobs[0].state = .done
+        cleanup.jobs[1].state = .deleting
+        self.cleanup = cleanup
+    }
+
+    /// Puts the folders still waiting back in the list. The one being
+    /// deleted has already left its project, so it finishes.
+    func cancelQueued() {
+        guard let cancelled = cleanup?.jobs.filter({ $0.state == .queued }), !cancelled.isEmpty else { return }
+        cleanup?.jobs.removeAll { $0.state == .queued }
+        for job in cancelled {
+            if let index = projects.firstIndex(where: { $0.root == job.project.root }) {
+                projects[index].artifacts.append(job.artifact)
+                projects[index].artifacts.sort { $0.reclaimable > $1.reclaimable }
+            } else {
+                var project = job.project
+                project.artifacts = [job.artifact]
+                projects.append(project)
+            }
+        }
+        projects.sort { $0.reclaimable == $1.reclaimable ? $0.root < $1.root : $0.reclaimable > $1.reclaimable }
+        save()
+    }
+
+    private func deleteNext() {
+        guard let cleanup, cleanup.current == nil else { return }
+        guard let index = cleanup.jobs.firstIndex(where: { $0.state == .queued }) else { return finishCleanup() }
+        self.cleanup?.jobs[index].state = .deleting
+        self.cleanup?.fraction = 0
+        let artifact = cleanup.jobs[index].artifact
+        let roots = folders
+        deleteQueue.async {
+            var published = Date.distantPast
+            let ok = BuildCacheScanner.remove(artifact, roots: roots) { fraction in
+                guard Date().timeIntervalSince(published) > 0.1 else { return }
+                published = Date()
+                DispatchQueue.main.async {
+                    guard self.cleanup?.current?.id == artifact.path else { return }
+                    self.cleanup?.fraction = fraction
+                }
             }
             DispatchQueue.main.async {
-                self.freeing -= min(bytes, self.freeing)
-                self.showFreed(removed)
-                if failed > 0 { self.scan() }
+                if let index = self.cleanup?.jobs.firstIndex(where: { $0.id == artifact.path }) {
+                    self.cleanup?.jobs[index].state = ok ? .done : .failed
+                }
+                self.deleteNext()
             }
         }
     }
 
-    private func showFreed(_ bytes: UInt64) {
-        freed = (freed ?? 0) + bytes
-        freedReset?.cancel()
-        let reset = DispatchWorkItem { [weak self] in self?.freed = nil }
-        freedReset = reset
+    /// Leaves the result on screen for a moment; failed folders come back with a rescan.
+    private func finishCleanup() {
+        guard let cleanup else { return }
+        guard !cleanup.jobs.isEmpty else {
+            self.cleanup = nil
+            return
+        }
+        if cleanup.failed > 0 { scan() }
+        let reset = DispatchWorkItem { [weak self] in self?.cleanup = nil }
+        cleanupReset = reset
         DispatchQueue.main.asyncAfter(deadline: .now() + 6, execute: reset)
+    }
+
+    /// Leaves out folders waiting to be deleted, so a rescan doesn't bring them back.
+    private func withoutPending(_ projects: [CacheProject]) -> [CacheProject] {
+        let pending = Set(cleanup?.jobs.filter { $0.state == .queued || $0.state == .deleting }.map(\.id) ?? [])
+        guard !pending.isEmpty else { return projects }
+        return projects.compactMap { project in
+            var project = project
+            project.artifacts.removeAll { pending.contains($0.path) }
+            return project.artifacts.isEmpty ? nil : project
+        }
     }
 }

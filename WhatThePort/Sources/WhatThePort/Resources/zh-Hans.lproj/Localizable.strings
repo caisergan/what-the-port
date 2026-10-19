@@ -318,7 +318,12 @@
 "Found automatically: the usual project folders and wherever your dev servers run. Worktrees inside them are included." = "自动找到：常用的项目文件夹，以及你的开发服务器运行的位置。其中的工作树也包含在内。";
 "Free %@" = "释放 %@";
 "Freed %@" = "已释放 %@";
-"Freeing %@…" = "正在释放 %@…";
+"Freed %@ of %@" = "已释放 %@ / %@";
+"%d of %d" = "%d/%d";
+"Cancel %d queued" = "取消 %d 个排队项";
+"%d kept" = "保留了 %d 个";
+"Changed since the scan, so it was kept." = "扫描后已更改，因此保留。";
+"Puts the folders that haven't started back in the list." = "将尚未开始的文件夹放回列表。";
 "Frees %@" = "可释放 %@";
 "Frees %@ of %@ on disk. The rest is shared with copies elsewhere, like the pnpm store." = "可释放磁盘上 %2$@ 中的 %1$@。其余部分与其他位置的副本共享，例如 pnpm 存储。";
 "Looking in %@" = "正在查找 %@";

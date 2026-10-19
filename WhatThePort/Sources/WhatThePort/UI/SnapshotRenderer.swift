@@ -22,11 +22,13 @@ enum SnapshotRenderer {
         try? FileManager.default.createDirectory(at: output, withIntermediateDirectories: true)
 
         var pages: [(String, PopoverRoute, Bool)] = [("servers", .servers, false), ("cleanup", .servers, true),
-                                                     ("caches", .caches, false), ("caches-confirm", .caches, true)]
+                                                     ("caches", .caches, false), ("caches-confirm", .caches, true),
+                                                     ("caches-freeing", .caches, false)]
         if let first = monitor.servers.first(where: { $0.agent != nil }) ?? monitor.servers.first {
             pages.insert(("detail", .detail(port: first.port), false), at: 1)
         }
         for (name, route, cleaning) in pages {
+            if name == "caches-freeing" { monitor.caches.previewCleanup() }
             // Render the same page at the popover's width without its menu-bar
             // window fitter, which would resize away the snapshot padding.
             let view = snapshotPage(monitor: monitor, route: route, cleaning: cleaning)
@@ -80,7 +82,8 @@ enum SnapshotRenderer {
             }
         case .caches:
             // The confirm page also opens the largest project, to show its folders.
-            BuildCachesView(monitor: monitor, expandFirst: cleaning, confirm: cleaning, back: {}, openSettings: {})
+            BuildCachesView(monitor: monitor, expandFirst: cleaning, confirm: cleaning,
+                            expandQueue: monitor.caches.cleanup != nil, back: {}, openSettings: {})
         }
     }
 

@@ -318,7 +318,12 @@
 "Found automatically: the usual project folders and wherever your dev servers run. Worktrees inside them are included." = "Automatisch gefunden: die üblichen Projektordner und überall, wo deine Entwicklungsserver laufen. Worktrees darin sind eingeschlossen.";
 "Free %@" = "%@ freigeben";
 "Freed %@" = "%@ freigegeben";
-"Freeing %@…" = "%@ wird freigegeben…";
+"Freed %@ of %@" = "%@ von %@ freigegeben";
+"%d of %d" = "%d von %d";
+"Cancel %d queued" = "%d in der Warteschlange abbrechen";
+"%d kept" = "%d behalten";
+"Changed since the scan, so it was kept." = "Seit dem Scan verändert, daher behalten.";
+"Puts the folders that haven't started back in the list." = "Legt Ordner, die noch nicht begonnen haben, zurück in die Liste.";
 "Frees %@" = "Gibt %@ frei";
 "Frees %@ of %@ on disk. The rest is shared with copies elsewhere, like the pnpm store." = "Gibt %@ von %@ auf dem Volume frei. Der Rest wird mit Kopien an anderer Stelle geteilt, etwa dem pnpm-Store.";
 "Looking in %@" = "Suche in %@";
