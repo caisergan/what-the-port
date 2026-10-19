@@ -318,7 +318,12 @@
 "Found automatically: the usual project folders and wherever your dev servers run. Worktrees inside them are included." = "Found automatically: the usual project folders and wherever your dev servers run. Worktrees inside them are included.";
 "Free %@" = "Free %@";
 "Freed %@" = "Freed %@";
-"Freeing %@…" = "Freeing %@…";
+"Freed %@ of %@" = "Freed %@ of %@";
+"%d of %d" = "%d of %d";
+"Cancel %d queued" = "Cancel %d queued";
+"%d kept" = "%d kept";
+"Changed since the scan, so it was kept." = "Changed since the scan, so it was kept.";
+"Puts the folders that haven't started back in the list." = "Puts the folders that haven't started back in the list.";
 "Frees %@" = "Frees %@";
 "Frees %@ of %@ on disk. The rest is shared with copies elsewhere, like the pnpm store." = "Frees %@ of %@ on disk. The rest is shared with copies elsewhere, like the pnpm store.";
 "Looking in %@" = "Looking in %@";

@@ -318,7 +318,12 @@
 "Found automatically: the usual project folders and wherever your dev servers run. Worktrees inside them are included." = "自動で検出：よく使われるプロジェクトフォルダと、開発サーバーが動いている場所。中のワークツリーも含まれます。";
 "Free %@" = "%@ を解放";
 "Freed %@" = "%@ を解放しました";
-"Freeing %@…" = "%@ を解放中…";
+"Freed %@ of %@" = "%2$@ 中 %1$@ を解放";
+"%d of %d" = "%d/%d";
+"Cancel %d queued" = "待機中の %d 件をキャンセル";
+"%d kept" = "%d 件を保持";
+"Changed since the scan, so it was kept." = "スキャン後に変更されたため保持しました。";
+"Puts the folders that haven't started back in the list." = "まだ始まっていないフォルダをリストに戻します。";
 "Frees %@" = "%@ を解放";
 "Frees %@ of %@ on disk. The rest is shared with copies elsewhere, like the pnpm store." = "ディスク上の %2$@ のうち %1$@ を解放します。残りは pnpm ストアなど別の場所のコピーと共有されています。";
 "Looking in %@" = "%@ を検索中";

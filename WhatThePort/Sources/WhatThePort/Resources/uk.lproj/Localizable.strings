@@ -318,7 +318,12 @@
 "Found automatically: the usual project folders and wherever your dev servers run. Worktrees inside them are included." = "Знайдено автоматично: звичні папки проєктів і місця, де працюють ваші сервери розробки. Worktree всередині них теж враховуються.";
 "Free %@" = "Звільнити %@";
 "Freed %@" = "Звільнено %@";
-"Freeing %@…" = "Звільнення %@…";
+"Freed %@ of %@" = "Звільнено %@ із %@";
+"%d of %d" = "%d з %d";
+"Cancel %d queued" = "Скасувати %d у черзі";
+"%d kept" = "%d залишено";
+"Changed since the scan, so it was kept." = "Змінено після сканування, тому залишено.";
+"Puts the folders that haven't started back in the list." = "Повертає до списку теки, які ще не почали видалятися.";
 "Frees %@" = "Звільнить %@";
 "Frees %@ of %@ on disk. The rest is shared with copies elsewhere, like the pnpm store." = "Звільнить %@ із %@ на диску. Решта спільна з копіями деінде, як-от сховище pnpm.";
 "Looking in %@" = "Пошук у %@";

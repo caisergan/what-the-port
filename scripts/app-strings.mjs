@@ -25,6 +25,7 @@ const KEYS = [
   'untouched %@', 'used %@ ago', 'Show folders', '%@ · %d folders', '%@ shared', 'Nothing to clean', 'No build caches in %@',
   'Select unused', 'Clear', 'Delete caches', 'Free %@', 'Delete %d %@', 'Web builds', 'Python envs', 'Python caches',
   'Deleted folders are gone for good. Your tools recreate them on the next install or build.',
+  'Freed %@ of %@', '%d of %d', 'Cancel %d queued', "Puts the folders that haven't started back in the list.",
 ]
 
 const unescape = (value) => value.replace(/\\(.)/g, (_, c) => (c === 'n' ? '\n' : c))
