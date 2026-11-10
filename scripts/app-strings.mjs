@@ -28,6 +28,16 @@ const KEYS = [
   'Worktrees', 'Worktree checkouts', 'worktree', 'worktrees', 'worktrees (few)', '%@ in %d %@', '%@ checkout',
   'Show worktrees', 'No build caches', "Worktree checkouts · %@. Removing a worktree frees it; deleting caches doesn't.",
   "Checkouts take %@: the worktrees' own files. Deleting caches leaves them; removing worktrees you no longer need frees them.",
+  'Whole worktree', 'Removing the worktree frees %@: its checkout and caches. Its branch stays.',
+  "A dev server is running in it on %@, so it's kept.", "%d uncommitted %@, so it's kept. Commit or stash them first.",
+  'change', 'changes', 'changes (few)', 'commit', 'commits', 'commits (few)',
+  'Untracked files will be deleted: %@', 'Ignored files like .env will be deleted: %@', '%d %@ on no remote. The branch keeps them.',
+  'Remove %d %@', 'Remove %d %@ and delete %d %@',
+  'Removes %d %@ with git worktree remove: their files are gone for good, their branches stay.',
+  'Untracked files in %d %@ will be deleted.', '.env or key files in %d %@ will be deleted.',
+  'Commits on no remote in %d %@ stay on their branches.', 'Anything with uncommitted changes is kept.',
+  'Select %d %@ untouched for %d days',
+  'Worktrees git can remove without losing uncommitted changes. Check the warnings before removing them.',
   'Freed %@ of %@', '%d of %d', 'Cancel %d queued', "Puts the folders that haven't started back in the list.",
 ]
 

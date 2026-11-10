@@ -124,7 +124,8 @@ export function SectionCopy({ index, stars }: { index: number; stars: number | n
           </p>
           <p className={styles.body}>
             Caches does the same for disk: <span className={styles.inlineMono}>node_modules</span>, build output and
-            caches across your projects and worktrees, with what each actually frees and what your worktrees' checkouts take.
+            caches across your projects and worktrees, with what each actually frees. Worktrees you’re done with can go too,
+            once git says what they’d lose.
           </p>
         </div>
       )

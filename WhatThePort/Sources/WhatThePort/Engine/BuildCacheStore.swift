@@ -17,6 +17,10 @@ final class BuildCacheStore: ObservableObject {
     @Published private(set) var progress: Progress?
     /// The deletion queue, kept briefly after it finishes to show what it freed.
     @Published private(set) var cleanup: Cleanup?
+    /// What removing each linked worktree would lose, by root, checked on demand.
+    @Published private(set) var worktreeStatuses: [String: WorktreeStatus] = [:]
+    private var checkingWorktrees = Set<String>()
+    private let statusQueue = DispatchQueue(label: "com.whattheport.caches.status", qos: .userInitiated, attributes: .concurrent)
 
     var isScanning: Bool { progress != nil }
     var reclaimable: UInt64 { projects.reduce(0) { $0 + $1.reclaimable } }
@@ -158,6 +162,16 @@ final class BuildCacheStore: ObservableObject {
         projects = BuildCacheScanner.scan(roots: roots)
         scannedAt = Date()
         scannedFolders = folders
+        let worktrees = projects.filter { $0.checkout != nil }
+        var statuses = [WorktreeStatus?](repeating: nil, count: worktrees.count)
+        let lock = NSLock()
+        DispatchQueue.concurrentPerform(iterations: worktrees.count) { index in
+            let status = BuildCacheScanner.worktreeStatus(worktrees[index].root, artifacts: worktrees[index].artifacts.map(\.path))
+            lock.lock()
+            statuses[index] = status
+            lock.unlock()
+        }
+        for (worktree, status) in zip(worktrees, statuses) { worktreeStatuses[worktree.root] = status }
     }
 
     /// Unchanged folders keep their last size unless `force` is set, so
@@ -214,14 +228,45 @@ final class BuildCacheStore: ObservableObject {
         }
     }
 
+    // MARK: - Worktrees
+
+    /// Asks git what removing each of these worktrees would lose, a few at a
+    /// time in the background. `force` checks again those already known.
+    func checkWorktrees(_ worktrees: [CacheProject], force: Bool = false) {
+        let pending = worktrees.filter { $0.checkout != nil && !checkingWorktrees.contains($0.root) && (force || worktreeStatuses[$0.root] == nil) }
+        guard !pending.isEmpty else { return }
+        checkingWorktrees.formUnion(pending.map(\.root))
+        let lock = NSLock()
+        var next = 0
+        for _ in 0..<min(4, pending.count) {
+            statusQueue.async {
+                while true {
+                    lock.lock()
+                    let index = next
+                    next += 1
+                    lock.unlock()
+                    guard index < pending.count else { return }
+                    let worktree = pending[index]
+                    let status = BuildCacheScanner.worktreeStatus(worktree.root, artifacts: worktree.artifacts.map(\.path))
+                    DispatchQueue.main.async {
+                        self.checkingWorktrees.remove(worktree.root)
+                        self.worktreeStatuses[worktree.root] = status ?? WorktreeStatus(locked: true)
+                    }
+                }
+            }
+        }
+    }
+
     // MARK: - Deleting
 
-    /// A folder waiting to be deleted, being deleted, or done.
+    /// A folder or worktree waiting to be deleted, being deleted, or done.
     struct CleanupJob: Identifiable, Equatable {
         enum State { case queued, deleting, done, failed }
+        /// For a worktree, its whole folder: what its caches and checkout free together.
         let artifact: BuildArtifact
         /// The project it came from, to put it back if the job is cancelled.
         let project: CacheProject
+        var isWorktree = false
         var state = State.queued
 
         var id: String { artifact.path }
@@ -256,13 +301,24 @@ final class BuildCacheStore: ObservableObject {
     /// first. Folders are deleted one at a time in the background, so picking
     /// more while it runs adds to the queue. Anything that fails its safety
     /// re-check stays on disk, and a rescan brings it back.
-    func delete(_ paths: Set<String>) {
-        let jobs = projects.flatMap { project in
+    ///
+    /// Worktrees in `worktrees` are removed whole, caches and all, after
+    /// their folders in `paths`.
+    func delete(_ paths: Set<String>, worktrees: Set<String> = []) {
+        let removed = projects.filter { worktrees.contains($0.root) && $0.checkout != nil }
+        let removedRoots = Set(removed.map(\.root))
+        let folderJobs = projects.filter { !removedRoots.contains($0.root) }.flatMap { project in
             project.artifacts.filter { paths.contains($0.path) }.map { CleanupJob(artifact: $0, project: project) }
         }
+        let worktreeJobs = removed.map { project in
+            CleanupJob(artifact: BuildArtifact(path: project.root, kind: .cache, size: project.size + project.checkoutBytes,
+                                               reclaimable: project.footprint, modified: project.lastUsed),
+                       project: project, isWorktree: true)
+        }
+        let jobs = folderJobs + worktreeJobs
         guard !jobs.isEmpty else { return }
         for index in projects.indices { projects[index].artifacts.removeAll { paths.contains($0.path) } }
-        projects.removeAll { !$0.isListed }
+        projects.removeAll { !$0.isListed || removedRoots.contains($0.root) }
         projects.sort(by: CacheProject.largerFirst)
         cleanupReset?.cancel()
         // A finished cleanup still on screen makes way for the new one.
@@ -291,7 +347,10 @@ final class BuildCacheStore: ObservableObject {
         guard let cancelled = cleanup?.jobs.filter({ $0.state == .queued }), !cancelled.isEmpty else { return }
         cleanup?.jobs.removeAll { $0.state == .queued }
         for job in cancelled {
-            if let index = projects.firstIndex(where: { $0.root == job.project.root }) {
+            if job.isWorktree {
+                projects.removeAll { $0.root == job.project.root }
+                projects.append(job.project)
+            } else if let index = projects.firstIndex(where: { $0.root == job.project.root }) {
                 projects[index].artifacts.append(job.artifact)
                 projects[index].artifacts.sort { $0.reclaimable > $1.reclaimable }
             } else {
@@ -309,11 +368,12 @@ final class BuildCacheStore: ObservableObject {
         guard let index = cleanup.jobs.firstIndex(where: { $0.state == .queued }) else { return finishCleanup() }
         self.cleanup?.jobs[index].state = .deleting
         self.cleanup?.fraction = 0
-        let artifact = cleanup.jobs[index].artifact
+        let job = cleanup.jobs[index]
+        let artifact = job.artifact
         let roots = folders
         deleteQueue.async {
             var published = Date.distantPast
-            let ok = BuildCacheScanner.remove(artifact, roots: roots) { fraction in
+            let report: (Double) -> Void = { fraction in
                 guard Date().timeIntervalSince(published) > 0.1 else { return }
                 published = Date()
                 DispatchQueue.main.async {
@@ -321,7 +381,11 @@ final class BuildCacheStore: ObservableObject {
                     self.cleanup?.fraction = fraction
                 }
             }
+            let ok = job.isWorktree
+                ? BuildCacheScanner.removeWorktree(job.project, roots: roots, progress: report)
+                : BuildCacheScanner.remove(artifact, roots: roots, progress: report)
             DispatchQueue.main.async {
+                if job.isWorktree { self.worktreeStatuses[job.project.root] = nil }
                 if let index = self.cleanup?.jobs.firstIndex(where: { $0.id == artifact.path }) {
                     self.cleanup?.jobs[index].state = ok ? .done : .failed
                 }
@@ -348,6 +412,7 @@ final class BuildCacheStore: ObservableObject {
         let pending = Set(cleanup?.jobs.filter { $0.state == .queued || $0.state == .deleting }.map(\.id) ?? [])
         guard !pending.isEmpty else { return projects }
         return projects.compactMap { project in
+            guard !pending.contains(project.root) else { return nil }
             var project = project
             project.artifacts.removeAll { pending.contains($0.path) }
             return project.isListed ? project : nil

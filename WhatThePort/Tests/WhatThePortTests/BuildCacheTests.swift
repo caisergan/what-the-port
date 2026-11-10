@@ -205,6 +205,92 @@ import Testing
         #expect(again.compactMap(\.checkout).allSatisfy { $0.reclaimable == 7 })
     }
 
+    /// Removing a worktree: git's status decides what is kept and what to warn
+    /// about, the branch stays, and tracked changes are never thrown away.
+    @Test func removesWorktreesOnlyWhenNothingTrackedIsLost() throws {
+        guard BuildCacheScanner.gitPath != nil else { return }
+        let root = (NSTemporaryDirectory() as NSString).appendingPathComponent("wtp-remove-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(atPath: root) }
+        func write(_ path: String, _ contents: String = "x") throws {
+            let url = URL(fileURLWithPath: root + "/" + path)
+            try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+            try contents.write(to: url, atomically: false, encoding: .utf8)
+        }
+        func git(_ arguments: String...) {
+            let result = BuildCacheScanner.git(["-c", "user.name=t", "-c", "user.email=t@t"] + arguments, in: root + "/shop")
+            #expect(result.status == 0, "git \(arguments.joined(separator: " "))")
+        }
+        try write("shop/package.json", "{}")
+        try write("shop/.gitignore", "node_modules/\n.env\n")
+        try write("shop/src/app.ts")
+        git("init", "-q")
+        git("add", ".")
+        git("commit", "-qm", "init")
+        for name in ["clean", "loose", "busy"] { git("worktree", "add", "-q", "-b", name, root + "/shop-" + name) }
+        try write("shop-clean/node_modules/pkg/index.js", String(repeating: "x", count: 4096))
+        try write("shop-loose/NOTES.md")
+        try write("shop-loose/.env", "TOKEN=1")
+        try write("shop-busy/src/app.ts", "changed")
+
+        let projects = BuildCacheScanner.scan(roots: [root])
+        func project(_ name: String) throws -> CacheProject { try #require(projects.first { $0.name == name }) }
+        func status(_ name: String) throws -> WorktreeStatus {
+            let worktree = try project(name)
+            return try #require(BuildCacheScanner.worktreeStatus(worktree.root, artifacts: worktree.artifacts.map(\.path)))
+        }
+        let clean = try status("shop-clean"), loose = try status("shop-loose"), busy = try status("shop-busy")
+        // node_modules is a cache, not untracked work.
+        #expect(clean.blocker == nil && !clean.hasWarnings)
+        #expect(loose.blocker == nil && loose.untracked == ["NOTES.md"] && loose.secrets == [".env"])
+        #expect(busy.blocker == .changes(1))
+        #expect(BuildCacheScanner.looksSecret(".env.local") && !BuildCacheScanner.looksSecret(".env.example") && !BuildCacheScanner.looksSecret("index.ts"))
+
+        #expect(BuildCacheScanner.removeWorktree(try project("shop-clean"), roots: [root]))
+        #expect(BuildCacheScanner.removeWorktree(try project("shop-loose"), roots: [root]))
+        #expect(!BuildCacheScanner.removeWorktree(try project("shop-busy"), roots: [root]))
+        #expect(!FileManager.default.fileExists(atPath: root + "/shop-clean") && !FileManager.default.fileExists(atPath: root + "/shop-loose"))
+        #expect(FileManager.default.fileExists(atPath: root + "/shop-busy/src/app.ts"))
+        // Outside the scanned folders, nothing happens.
+        #expect(!BuildCacheScanner.removeWorktree(try project("shop-busy"), roots: [root + "/elsewhere"]))
+        // The branches stay, and git no longer lists the removed worktrees.
+        let branches = BuildCacheScanner.git(["branch", "--format=%(refname:short)"], in: root + "/shop").lines
+        #expect(Set(["clean", "loose", "busy"]).isSubset(of: branches))
+        let listed = BuildCacheScanner.git(["worktree", "list", "--porcelain"], in: root + "/shop").lines.filter { $0.hasPrefix("worktree ") }
+        #expect(listed.count == 2)
+    }
+
+    /// The page's flow for worktrees: check with git, queue the removal, and
+    /// the worktree leaves the list and the disk.
+    @MainActor @Test func storeRemovesWorktrees() async throws {
+        guard BuildCacheScanner.gitPath != nil else { return }
+        let root = (NSTemporaryDirectory() as NSString).appendingPathComponent("wtp-store-wt-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(atPath: root) }
+        try FileManager.default.createDirectory(atPath: root + "/app", withIntermediateDirectories: true)
+        try "x".write(toFile: root + "/app/README.md", atomically: false, encoding: .utf8)
+        for arguments in [["init", "-q"], ["add", "."], ["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "init"],
+                          ["worktree", "add", "-q", "-b", "old", root + "/app-old"]] {
+            #expect(BuildCacheScanner.git(arguments, in: root + "/app").status == 0)
+        }
+        let saved = UserDefaults.standard.object(forKey: Preferences.cacheFolders)
+        defer { UserDefaults.standard.set(saved, forKey: Preferences.cacheFolders) }
+        let store = BuildCacheStore()
+        store.setFolders([root])
+        store.scan(force: true)
+        for _ in 0..<200 where store.isScanning { try await Task.sleep(for: .milliseconds(25)) }
+        let worktree = try #require(store.projects.first { $0.name == "app-old" })
+        store.checkWorktrees([worktree])
+        for _ in 0..<200 where store.worktreeStatuses[worktree.root] == nil { try await Task.sleep(for: .milliseconds(25)) }
+        #expect(store.worktreeStatuses[worktree.root]?.blocker == nil)
+
+        store.delete([], worktrees: [worktree.root])
+        #expect(!store.projects.contains { $0.root == worktree.root })
+        #expect(store.cleanup?.jobs.first?.isWorktree == true)
+        for _ in 0..<200 where store.cleanup?.isFinished == false { try await Task.sleep(for: .milliseconds(25)) }
+        #expect(store.cleanup?.failed == 0)
+        #expect(!FileManager.default.fileExists(atPath: worktree.root))
+        #expect(FileManager.default.fileExists(atPath: root + "/app/README.md"))
+    }
+
     /// A repository and its worktrees share one row, placed by everything they take.
     @Test func groupsWorktreesWithTheirRepository() {
         func project(_ root: String, caches: UInt64, checkout: UInt64? = nil, repository: String? = nil) -> CacheProject {
