@@ -13,9 +13,10 @@ struct BuildCachesView: View {
     private let maxVisibleRows = 7
     /// Selected artifact paths.
     @State private var selection: Set<String>
+    /// Expanded row ids.
     @State private var expanded: Set<String> = []
-    /// The kind under the pointer in the disk bar.
-    @State private var focus: ArtifactKind?
+    /// The segment under the pointer in the disk bar.
+    @State private var focus: CacheFocus?
     @State private var hoveredRow: String?
     @State private var confirming = false
     /// Suggestions are made once, from the first results there are.
@@ -34,7 +35,7 @@ struct BuildCachesView: View {
         let ready = !monitor.caches.projects.isEmpty
         _selection = State(initialValue: ready ? Self.suggestedSelection(monitor) : [])
         _hasSuggested = State(initialValue: ready)
-        _expanded = State(initialValue: expandFirst ? Set(monitor.caches.projects.prefix(1).map(\.root)) : [])
+        _expanded = State(initialValue: expandFirst ? Set(CacheRowItem.items(monitor.caches.projects).prefix(1).map(\.id)) : [])
         _confirming = State(initialValue: confirm)
     }
 
@@ -44,7 +45,7 @@ struct BuildCachesView: View {
             SectionDivider()
             if store.projects.isEmpty {
                 emptyState
-            } else if store.projects.count > maxVisibleRows || !expanded.isEmpty {
+            } else if rowItems.count > maxVisibleRows || !expanded.isEmpty {
                 ScrollView { rows }.frame(height: CGFloat(maxVisibleRows) * 52 + 12)
             } else {
                 rows
@@ -79,7 +80,7 @@ struct BuildCachesView: View {
         VStack(alignment: .leading, spacing: 10) {
             if let focus {
                 HStack(spacing: 6) {
-                    Circle().fill(Theme.portColor(at: focus.colorIndex)).frame(width: 6, height: 6)
+                    Circle().fill(focus.color).frame(width: 6, height: 6)
                     Text(focus.label).font(Theme.bodyMedium).foregroundStyle(Theme.text1)
                 }
                 .frame(maxWidth: .infinity)
@@ -94,10 +95,11 @@ struct BuildCachesView: View {
                         .contentTransition(.numericText())
                     Text(amount.unit).font(Theme.mono).foregroundStyle(Theme.text3)
                 }
+                .help(focus == nil ? sharedHelp(size: artifacts.reduce(0) { $0 + $1.size }, reclaimable: store.reclaimable) : "")
                 Spacer()
                 summaryDetail
             }
-            CacheDiskBar(store: store, disk: disk, focus: $focus, highlighted: hoveredRow.flatMap(project(root:))) { kind in
+            CacheDiskBar(store: store, disk: disk, focus: $focus, highlighted: hoveredRow.flatMap(item(id:))?.segments) { kind in
                 toggle(artifacts.filter { $0.kind == kind })
             }
             .frame(height: 16)
@@ -113,9 +115,13 @@ struct BuildCachesView: View {
     }
 
     @ViewBuilder private var summaryDetail: some View {
-        if let focus {
-            let count = artifacts.filter { $0.kind == focus }.count
+        if case .kind(let kind) = focus {
+            let count = artifacts.filter { $0.kind == kind }.count
             Text(L10n.format("%d %@", count, L10n.counted("folder", "folders", count: count)))
+                .font(Theme.body).foregroundStyle(Theme.text2)
+        } else if focus == .worktrees {
+            let count = store.worktreeCount
+            Text(L10n.format("%d %@", count, L10n.counted("worktree", "worktrees", count: count)))
                 .font(Theme.body).foregroundStyle(Theme.text2)
         } else if let cleanup = store.cleanup, !cleanup.isFinished {
             HStack(spacing: 7) {
@@ -155,32 +161,45 @@ struct BuildCachesView: View {
         }
     }
 
-    private func total(of kind: ArtifactKind) -> UInt64 {
-        artifacts.filter { $0.kind == kind }.reduce(0) { $0 + $1.reclaimable }
+    private func total(of focus: CacheFocus) -> UInt64 {
+        switch focus {
+        case .kind(let kind): artifacts.filter { $0.kind == kind }.reduce(0) { $0 + $1.reclaimable }
+        case .worktrees: store.checkouts
+        }
     }
 
-    private func project(root: String) -> CacheProject? {
-        store.projects.first { $0.root == root }
+    private func item(id: String) -> CacheRowItem? {
+        rowItems.first { $0.id == id }
     }
 
     // MARK: - Rows
 
+    private var rowItems: [CacheRowItem] { CacheRowItem.items(store.projects) }
+
     private var rows: some View {
         LazyVStack(spacing: 0) {
             let ports = serverPorts
-            ForEach(store.projects) { project in
-                CacheProjectRow(project: project, selection: selection, ports: ports[project.root] ?? [],
-                                isStale: store.isStale(project), isExpanded: expanded.contains(project.root),
-                                isDimmed: focus != nil && !project.artifacts.contains { $0.kind == focus },
-                                onHover: { hovering in
-                                    if hovering { hoveredRow = project.root } else if hoveredRow == project.root { hoveredRow = nil }
-                                },
-                                toggle: toggle,
-                                expand: {
-                                    withAnimation(.snappy(duration: 0.2)) {
-                                        if expanded.contains(project.root) { expanded.remove(project.root) } else { expanded.insert(project.root) }
-                                    }
-                                })
+            ForEach(rowItems) { item in
+                let id = item.id
+                let onHover: (Bool) -> Void = { hovering in
+                    if hovering { hoveredRow = id } else if hoveredRow == id { hoveredRow = nil }
+                }
+                let expand = {
+                    withAnimation(.snappy(duration: 0.2)) {
+                        if expanded.contains(id) { expanded.remove(id) } else { expanded.insert(id) }
+                    }
+                }
+                let isDimmed = focus.map { !item.segments.contains($0) } ?? false
+                switch item {
+                case .project(let project):
+                    CacheProjectRow(project: project, selection: selection, ports: ports[project.root] ?? [],
+                                    isStale: store.isStale(project), isExpanded: expanded.contains(id),
+                                    isDimmed: isDimmed, onHover: onHover, toggle: toggle, expand: expand)
+                case .worktrees(let group):
+                    WorktreeGroupRow(group: group, selection: selection, ports: ports, staleAfter: store.staleAfter,
+                                     isExpanded: expanded.contains(id), isDimmed: isDimmed,
+                                     onHover: onHover, toggle: toggle, expand: expand)
+                }
             }
         }
         .padding(6)
@@ -353,11 +372,14 @@ struct CacheProjectRow: View {
     @State private var isHovered = false
 
     private var selectedCount: Int { project.artifacts.filter { selection.contains($0.path) }.count }
+    private var hasCaches: Bool { !project.artifacts.isEmpty }
 
     var body: some View {
         VStack(spacing: 0) {
             HStack(spacing: 0) {
-                Checkbox(isOn: selectedCount == project.artifacts.count, isMixed: selectedCount > 0 && selectedCount < project.artifacts.count)
+                Checkbox(isOn: hasCaches && selectedCount == project.artifacts.count,
+                         isMixed: selectedCount > 0 && selectedCount < project.artifacts.count)
+                    .opacity(hasCaches ? 1 : 0.3)
                     .padding(.trailing, 12)
 
                 VStack(alignment: .leading, spacing: 2) {
@@ -379,21 +401,21 @@ struct CacheProjectRow: View {
                     }
                 }
 
-                Text(Format.diskBytes(project.reclaimable))
-                    .font(Theme.mono)
-                    .foregroundStyle(Theme.text1.opacity(0.85))
-                    .frame(width: 64, alignment: .trailing)
-                    .help(sharedHelp(size: project.size, reclaimable: project.reclaimable))
+                CacheSize(reclaimable: project.reclaimable, size: project.size, checkout: project.checkout, hasCaches: hasCaches)
 
-                Button(action: expand) {
-                    Image(systemName: isExpanded ? "chevron.up" : "chevron.down")
-                        .font(.system(size: 9, weight: .bold))
-                        .foregroundStyle(Theme.text3)
-                        .frame(width: 22, height: 22)
-                        .contentShape(Rectangle())
+                if hasCaches {
+                    Button(action: expand) {
+                        Image(systemName: isExpanded ? "chevron.up" : "chevron.down")
+                            .font(.system(size: 9, weight: .bold))
+                            .foregroundStyle(Theme.text3)
+                            .frame(width: 22, height: 22)
+                            .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .help(isExpanded ? L10n.text("Less") : L10n.text("Show folders"))
+                } else {
+                    Color.clear.frame(width: 22, height: 22)
                 }
-                .buttonStyle(.plain)
-                .help(isExpanded ? L10n.text("Less") : L10n.text("Show folders"))
             }
             .padding(.leading, 10)
             .padding(.trailing, 4)
@@ -401,7 +423,7 @@ struct CacheProjectRow: View {
             .contentShape(Rectangle())
             .onTapGesture { toggle(project.artifacts) }
 
-            if isExpanded {
+            if isExpanded && hasCaches {
                 VStack(spacing: 0) {
                     ForEach(groups, id: \.name) { group in
                         groupRow(group)
@@ -445,13 +467,15 @@ struct CacheProjectRow: View {
         return isStale ? L10n.format("untouched %@", L10n.duration(age, short: true)) : L10n.format("used %@ ago", L10n.duration(age, short: true))
     }
 
-    /// The worktree's repository, then the kinds inside, largest first.
+    /// The worktree's repository, then the kinds inside, largest first, or
+    /// the checkout's size when it has no caches.
     private var kindText: String {
-        var totals: [ArtifactKind: UInt64] = [:]
-        for artifact in project.artifacts { totals[artifact.kind, default: 0] += artifact.reclaimable }
-        let labels = totals.sorted { $0.value == $1.value ? $0.key.colorIndex < $1.key.colorIndex : $0.value > $1.value }.map(\.key.label)
-        let kinds = labels.count > 3 ? labels.prefix(2).joined(separator: ", ") + " +\(labels.count - 2)" : labels.joined(separator: ", ")
+        let kinds = cacheKinds(project.artifacts)
         guard let repository = project.repository else { return kinds }
+        // Without caches, the checkout's size is the point, so it goes first.
+        if project.artifacts.isEmpty, project.checkout != nil {
+            return L10n.format("%@ checkout", Format.diskBytes(project.checkoutBytes)) + " · " + L10n.format("%@ worktree", repository)
+        }
         return L10n.format("%@ worktree", repository) + " · " + kinds
     }
 
@@ -503,11 +527,301 @@ struct CacheProjectRow: View {
         .onTapGesture { toggle(group.items) }
         .environment(\.layoutDirection, .leftToRight)
     }
+}
 
-    private func sharedHelp(size: UInt64, reclaimable: UInt64) -> String {
-        guard size > reclaimable + 1_048_576 else { return L10n.format("Frees %@", Format.diskBytes(reclaimable)) }
-        return L10n.format("Frees %@ of %@ on disk. The rest is shared with copies elsewhere, like the pnpm store.",
-                           Format.diskBytes(reclaimable), Format.diskBytes(size))
+/// The kinds of cache among `artifacts`, largest first: "node_modules, .next +2".
+func cacheKinds(_ artifacts: [BuildArtifact]) -> String {
+    var totals: [ArtifactKind: UInt64] = [:]
+    for artifact in artifacts { totals[artifact.kind, default: 0] += artifact.reclaimable }
+    let labels = totals.sorted { $0.value == $1.value ? $0.key.colorIndex < $1.key.colorIndex : $0.value > $1.value }.map(\.key.label)
+    return labels.count > 3 ? labels.prefix(2).joined(separator: ", ") + " +\(labels.count - 2)" : labels.joined(separator: ", ")
+}
+
+/// What deleting caches frees, and how much of what they take is shared.
+func sharedHelp(size: UInt64, reclaimable: UInt64) -> String {
+    guard size > reclaimable + 1_048_576 else { return L10n.format("Frees %@", Format.diskBytes(reclaimable)) }
+    return L10n.format("Frees %@ of %@ on disk. The rest is shared with copies elsewhere, like the pnpm store.",
+                       Format.diskBytes(reclaimable), Format.diskBytes(size))
+}
+
+/// A row's size column: what its caches free, or a dash when it has none.
+/// Its tooltip adds what's shared and what the worktree's checkout takes.
+struct CacheSize: View {
+    let reclaimable: UInt64
+    let size: UInt64
+    let checkout: WorktreeCheckout?
+    let hasCaches: Bool
+    var font = Theme.mono
+    var color = Theme.text1.opacity(0.85)
+
+    var body: some View {
+        Text(hasCaches ? Format.diskBytes(reclaimable) : "–")
+            .font(font)
+            .foregroundStyle(hasCaches ? color : Theme.text3)
+            .frame(width: 64, alignment: .trailing)
+            .help(help)
+    }
+
+    private var help: String {
+        let caches = hasCaches ? sharedHelp(size: size, reclaimable: reclaimable) : L10n.text("No build caches")
+        guard let checkout else { return caches }
+        return caches + "\n" + L10n.format("Its checkout takes another %@: the worktree's own files. Deleting caches leaves them; removing the worktree frees them.",
+                                            Format.diskBytes(checkout.reclaimable))
+    }
+}
+
+// MARK: - Worktrees
+
+/// A repository and its linked worktrees, listed in one row.
+struct WorktreeGroup: Equatable {
+    let repositoryRoot: String
+    let name: String
+    /// The main repository, when it has caches of its own.
+    let main: CacheProject?
+    let worktrees: [CacheProject]
+
+    /// The main repository first, then its worktrees.
+    var members: [CacheProject] { (main.map { [$0] } ?? []) + worktrees }
+    var artifacts: [BuildArtifact] { members.flatMap(\.artifacts) }
+    var size: UInt64 { members.reduce(0) { $0 + $1.size } }
+    var reclaimable: UInt64 { members.reduce(0) { $0 + $1.reclaimable } }
+    var checkoutBytes: UInt64 { worktrees.reduce(0) { $0 + $1.checkoutBytes } }
+    var lastUsed: Date { members.map(\.lastUsed).max() ?? .distantPast }
+}
+
+/// A row on the page: a project, or every worktree of a repository that has several.
+enum CacheRowItem: Identifiable {
+    case project(CacheProject)
+    case worktrees(WorktreeGroup)
+
+    var id: String {
+        switch self {
+        case .project(let project): project.root
+        case .worktrees(let group): "worktrees:" + group.repositoryRoot
+        }
+    }
+
+    var artifacts: [BuildArtifact] {
+        switch self {
+        case .project(let project): project.artifacts
+        case .worktrees(let group): group.artifacts
+        }
+    }
+
+    private var reclaimable: UInt64 { artifacts.reduce(0) { $0 + $1.reclaimable } }
+
+    private var checkoutBytes: UInt64 {
+        switch self {
+        case .project(let project): project.checkoutBytes
+        case .worktrees(let group): group.checkoutBytes
+        }
+    }
+
+    /// The disk bar segments this row contributes to.
+    var segments: Set<CacheFocus> {
+        var segments = Set(artifacts.map { CacheFocus.kind($0.kind) })
+        if checkoutBytes > 0 { segments.insert(.worktrees) }
+        return segments
+    }
+
+    /// A repository with worktrees collapses into one row with them, once
+    /// there are two or more to list. Rows go by what they take in all,
+    /// caches and checkouts together.
+    static func items(_ projects: [CacheProject]) -> [CacheRowItem] {
+        let roots = Dictionary(projects.map { ($0.root, $0) }) { first, _ in first }
+        let byRepository = Dictionary(grouping: projects.filter { $0.checkout != nil && $0.repositoryRoot != nil }) { $0.repositoryRoot! }
+            .filter { $0.value.count + (roots[$0.key] == nil ? 0 : 1) > 1 }
+        var placed = Set<String>()
+        var items: [CacheRowItem] = []
+        for project in projects {
+            let repository = project.checkout != nil ? project.repositoryRoot : project.root
+            guard let repository, let worktrees = byRepository[repository] else {
+                items.append(.project(project))
+                continue
+            }
+            guard placed.insert(repository).inserted else { continue }
+            items.append(.worktrees(WorktreeGroup(repositoryRoot: repository, name: (repository as NSString).lastPathComponent,
+                                                  main: roots[repository], worktrees: worktrees.sorted(by: CacheProject.largerFirst))))
+        }
+        return items.enumerated().sorted { a, b in
+            let first = a.element.reclaimable + a.element.checkoutBytes, second = b.element.reclaimable + b.element.checkoutBytes
+            if first != second { return first > second }
+            if a.element.reclaimable != b.element.reclaimable { return a.element.reclaimable > b.element.reclaimable }
+            return a.offset < b.offset
+        }.map(\.element)
+    }
+}
+
+/// A part of the disk bar: one kind of cache, or the worktrees' checkouts.
+enum CacheFocus: Hashable {
+    case kind(ArtifactKind)
+    case worktrees
+
+    var label: String {
+        switch self {
+        case .kind(let kind): kind.label
+        case .worktrees: L10n.text("Worktree checkouts")
+        }
+    }
+
+    var color: Color {
+        switch self {
+        case .kind(let kind): Theme.portColor(at: kind.colorIndex)
+        case .worktrees: Theme.worktreeCheckout
+        }
+    }
+}
+
+/// Every worktree of a repository: what their caches free, and what their
+/// checkouts take on top. Expands to one line per worktree.
+struct WorktreeGroupRow: View {
+    let group: WorktreeGroup
+    let selection: Set<String>
+    /// Ports of dev servers by project root.
+    let ports: [String: [Int]]
+    let staleAfter: TimeInterval
+    let isExpanded: Bool
+    var isDimmed = false
+    var onHover: (Bool) -> Void = { _ in }
+    let toggle: ([BuildArtifact]) -> Void
+    let expand: () -> Void
+    @State private var isHovered = false
+
+    private var artifacts: [BuildArtifact] { group.artifacts }
+    private var selectedCount: Int { artifacts.filter { selection.contains($0.path) }.count }
+    private var runningPorts: [Int] { group.members.flatMap { ports[$0.root] ?? [] }.sorted() }
+
+    var body: some View {
+        VStack(spacing: 0) {
+            HStack(spacing: 0) {
+                Checkbox(isOn: !artifacts.isEmpty && selectedCount == artifacts.count,
+                         isMixed: selectedCount > 0 && selectedCount < artifacts.count)
+                    .opacity(artifacts.isEmpty ? 0.3 : 1)
+                    .padding(.trailing, 12)
+
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(group.name)
+                        .font(Theme.bodyMedium)
+                        .foregroundStyle(Theme.text1)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                        .help(group.repositoryRoot)
+                    caption
+                }
+                .padding(.trailing, 10)
+
+                Spacer(minLength: 0)
+
+                if isHovered {
+                    IconButton(systemName: "folder", background: .clear, size: 22, help: L10n.text("Reveal in Finder")) {
+                        NSWorkspace.shared.selectFile(nil, inFileViewerRootedAtPath: group.repositoryRoot)
+                    }
+                }
+
+                CacheSize(reclaimable: group.reclaimable, size: group.size, checkout: nil, hasCaches: !artifacts.isEmpty)
+
+                Button(action: expand) {
+                    Image(systemName: isExpanded ? "chevron.up" : "chevron.down")
+                        .font(.system(size: 9, weight: .bold))
+                        .foregroundStyle(Theme.text3)
+                        .frame(width: 22, height: 22)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .help(isExpanded ? L10n.text("Less") : L10n.text("Show worktrees"))
+            }
+            .padding(.leading, 10)
+            .padding(.trailing, 4)
+            .padding(.vertical, 9)
+            .contentShape(Rectangle())
+            .onTapGesture { toggle(artifacts) }
+
+            if isExpanded {
+                VStack(spacing: 0) {
+                    ForEach(group.members) { member in
+                        memberRow(member)
+                    }
+                }
+                .padding(.bottom, 6)
+                .transition(.opacity)
+            }
+        }
+        .opacity(isDimmed ? 0.35 : 1)
+        .hoverHighlight(isHovered)
+        .animation(.easeOut(duration: 0.12), value: isDimmed)
+        .onHover { hovering in
+            isHovered = hovering
+            onHover(hovering)
+        }
+    }
+
+    private var caption: some View {
+        let count = group.worktrees.count
+        let worktrees = L10n.format("%@ in %d %@", Format.diskBytes(group.checkoutBytes), count, L10n.counted("worktree", "worktrees", count: count))
+        return HStack(spacing: 5) {
+            if !runningPorts.isEmpty {
+                HStack(spacing: 4) {
+                    Image(systemName: "bolt.fill").font(.system(size: 8))
+                    Text(L10n.format("Server on %@", runningPorts.map { ":\($0)" }.joined(separator: " "))).lineLimit(1)
+                }
+                .foregroundStyle(Theme.amber)
+                .environment(\.layoutDirection, .leftToRight)
+                Text("·")
+            }
+            Text(worktrees).fixedSize()
+            Text("·")
+            Text(ageText).lineLimit(1).truncationMode(.tail)
+        }
+        .font(Theme.caption)
+        .foregroundStyle(Theme.text2)
+        .help(L10n.format("Checkouts take %@: the worktrees' own files. Deleting caches leaves them; removing worktrees you no longer need frees them.",
+                                              Format.diskBytes(group.checkoutBytes)))
+    }
+
+    private var ageText: String {
+        let age = Date().timeIntervalSince(group.lastUsed)
+        return age >= staleAfter ? L10n.format("untouched %@", L10n.duration(age, short: true)) : L10n.format("used %@ ago", L10n.duration(age, short: true))
+    }
+
+    /// One line per worktree with its checkout; the main repository's line names its caches instead.
+    private func memberRow(_ worktree: CacheProject) -> some View {
+        let selected = worktree.artifacts.filter { selection.contains($0.path) }.count
+        let hasCaches = !worktree.artifacts.isEmpty
+        let running = !(ports[worktree.root] ?? []).isEmpty
+        return HStack(spacing: 0) {
+            Checkbox(isOn: hasCaches && selected == worktree.artifacts.count,
+                     isMixed: selected > 0 && selected < worktree.artifacts.count, size: 12)
+                .opacity(hasCaches ? 1 : 0.3)
+                .padding(.trailing, 10)
+            Text(worktree.name)
+                .font(Theme.monoCaption)
+                .foregroundStyle(Theme.text1.opacity(0.85))
+                .lineLimit(1)
+                .truncationMode(.middle)
+                .help([worktree.root, worktree.branch].compactMap { $0 }.joined(separator: "\n"))
+            if running {
+                Image(systemName: "bolt.fill").font(.system(size: 8)).foregroundStyle(Theme.amber)
+                    .padding(.leading, 5)
+                    .help(L10n.format("Server on %@", (ports[worktree.root] ?? []).map { ":\($0)" }.joined(separator: " ")))
+            }
+            Spacer(minLength: 8)
+            Text(worktree.checkout == nil ? cacheKinds(worktree.artifacts) : L10n.format("%@ checkout", Format.diskBytes(worktree.checkoutBytes)))
+                .font(Theme.caption).foregroundStyle(Theme.text3)
+                .lineLimit(1)
+                .fixedSize()
+                .padding(.trailing, 8)
+            CacheSize(reclaimable: worktree.reclaimable, size: worktree.size, checkout: worktree.checkout, hasCaches: hasCaches,
+                      font: Theme.monoCaption, color: Theme.text2)
+        }
+        .padding(.leading, 38)
+        .padding(.trailing, 30)
+        .frame(height: 24)
+        .contentShape(Rectangle())
+        .onTapGesture { toggle(worktree.artifacts) }
+        .contextMenu {
+            Button(L10n.text("Reveal in Finder")) { NSWorkspace.shared.selectFile(nil, inFileViewerRootedAtPath: worktree.root) }
+        }
+        .environment(\.layoutDirection, .leftToRight)
     }
 }
 
@@ -683,14 +997,15 @@ struct ProgressRing: View {
 
 // MARK: - Disk bar
 
-/// The Mac's disk, like the memory bar: build caches by kind as raised
-/// segments, everything else as a thin baseline, free space as the track.
+/// The Mac's disk, like the memory bar: build caches by kind and worktree
+/// checkouts as raised segments, everything else as a thin baseline, free
+/// space as the track.
 struct CacheDiskBar: View {
     @ObservedObject var store: BuildCacheStore
     let disk: DiskSpace?
-    @Binding var focus: ArtifactKind?
-    /// A project whose row is hovered: its kinds stay bright.
-    var highlighted: CacheProject?
+    @Binding var focus: CacheFocus?
+    /// The segments of the row under the pointer stay bright.
+    var highlighted: Set<CacheFocus>?
     let activate: (ArtifactKind) -> Void
 
     private let spacing: CGFloat = 2
@@ -698,13 +1013,14 @@ struct CacheDiskBar: View {
     var body: some View {
         GeometryReader { geometry in
             let kinds = kindTotals
-            let caches = kinds.reduce(0) { $0 + $1.bytes }
-            let used = max(disk?.used ?? caches, caches)
+            let checkouts = store.checkouts
+            let shown = kinds.reduce(0) { $0 + $1.bytes } + checkouts
+            let used = max(disk?.used ?? shown, shown)
             let capacity = max(disk?.total ?? used, used, 1)
-            let rest = used - caches
-            let segments = kinds.count + (rest > 0 ? 1 : 0)
+            let rest = used - shown
+            let segments = kinds.count + (checkouts > 0 ? 1 : 0) + (rest > 0 ? 1 : 0)
             let unit = max(geometry.size.width - CGFloat(max(segments - 1, 0)) * spacing, 0) / CGFloat(capacity)
-            let lit = highlighted.map { Set($0.artifacts.map(\.kind)) }
+            let lit = highlighted
             ZStack(alignment: .leading) {
                 Capsule()
                     .fill(Theme.memoryTrack)
@@ -712,8 +1028,8 @@ struct CacheDiskBar: View {
                     .help(L10n.format("Free · %@", Format.diskBytes(disk?.free ?? 0)))
                 HStack(spacing: spacing) {
                     ForEach(kinds, id: \.kind) { entry in
-                        let isFocused = focus == entry.kind
-                        let isDimmed = (focus != nil && !isFocused) || (lit.map { !$0.contains(entry.kind) } ?? false)
+                        let isFocused = focus == .kind(entry.kind)
+                        let isDimmed = (focus != nil && !isFocused) || (lit.map { !$0.contains(.kind(entry.kind)) } ?? false)
                         RoundedRectangle(cornerRadius: 1.5)
                             .fill(Theme.portColor(at: entry.kind.colorIndex))
                             .frame(height: isFocused ? 10 : 8)
@@ -721,10 +1037,24 @@ struct CacheDiskBar: View {
                             .frame(width: max(unit * CGFloat(entry.bytes), 2), height: geometry.size.height)
                             .contentShape(Rectangle())
                             .onHover { hovering in
-                                if hovering { focus = entry.kind } else if focus == entry.kind { focus = nil }
+                                if hovering { focus = .kind(entry.kind) } else if focus == .kind(entry.kind) { focus = nil }
                             }
                             .onTapGesture { activate(entry.kind) }
                             .help(L10n.format("%@ · %@. Click to select them all.", entry.kind.label, Format.diskBytes(entry.bytes)))
+                    }
+                    if checkouts > 0 {
+                        let isFocused = focus == .worktrees
+                        let isDimmed = (focus != nil && !isFocused) || (lit.map { !$0.contains(.worktrees) } ?? false)
+                        RoundedRectangle(cornerRadius: 1.5)
+                            .fill(Theme.worktreeCheckout)
+                            .frame(height: isFocused ? 10 : 8)
+                            .opacity(isDimmed ? 0.35 : 1)
+                            .frame(width: max(unit * CGFloat(checkouts), 2), height: geometry.size.height)
+                            .contentShape(Rectangle())
+                            .onHover { hovering in
+                                if hovering { focus = .worktrees } else if focus == .worktrees { focus = nil }
+                            }
+                            .help(L10n.format("Worktree checkouts · %@. Removing a worktree frees it; deleting caches doesn't.", Format.diskBytes(checkouts)))
                     }
                     if rest > 0 {
                         RoundedRectangle(cornerRadius: 1)
@@ -737,7 +1067,7 @@ struct CacheDiskBar: View {
             }
             .frame(maxHeight: .infinity)
             .animation(.easeOut(duration: 0.12), value: focus)
-            .animation(.easeOut(duration: 0.12), value: highlighted?.root)
+            .animation(.easeOut(duration: 0.12), value: highlighted)
         }
     }
 
@@ -748,21 +1078,36 @@ struct CacheDiskBar: View {
     }
 }
 
-/// Caches · Other · Free of the disk's total.
+/// Caches · Worktrees · Other · Free of the disk's total.
 struct CacheLegend: View {
     @ObservedObject var store: BuildCacheStore
     let disk: DiskSpace?
 
     var body: some View {
-        HStack(spacing: 10) {
+        // With worktrees there may be no room for Other; it's the least useful item.
+        ViewThatFits(in: .horizontal) {
+            legend(showsOther: true)
+            legend(showsOther: false)
+        }
+    }
+
+    private func legend(showsOther: Bool) -> some View {
+        let shown = store.reclaimable + store.checkouts
+        return HStack(spacing: 10) {
             item(swatch: Theme.text1.opacity(0.95), tall: true, label: L10n.text("Caches"), value: amount(store.reclaimable))
                 .fixedSize()
+            if store.checkouts > 0 {
+                item(swatch: Theme.worktreeCheckout, tall: true, label: L10n.text("Worktrees"), value: amount(store.checkouts))
+                    .fixedSize()
+                    .help(L10n.format("Checkouts take %@: the worktrees' own files. Deleting caches leaves them; removing worktrees you no longer need frees them.",
+                                      Format.diskBytes(store.checkouts)))
+            }
             if let disk {
-                // The only item that may truncate, so long translations never widen the popover.
-                item(swatch: Theme.text1.opacity(0.12), tall: false, label: L10n.text("Other"),
-                     value: amount(disk.used > store.reclaimable ? disk.used - store.reclaimable : 0))
-                    .fixedSize(horizontal: false, vertical: true)
-                    .layoutPriority(-1)
+                if showsOther {
+                    item(swatch: Theme.text1.opacity(0.12), tall: false, label: L10n.text("Other"),
+                         value: amount(disk.used > shown ? disk.used - shown : 0))
+                        .fixedSize()
+                }
                 item(swatch: Theme.memoryTrack, tall: false, label: L10n.text("Free"),
                      value: L10n.format("%@ of %@", number(disk.free), amount(disk.total)))
                     .fixedSize()

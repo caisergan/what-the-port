@@ -152,6 +152,82 @@ import Testing
         #expect(!FileManager.default.fileExists(atPath: modules.path))
     }
 
+    /// Worktrees take space beyond their caches: their own checkout. It's
+    /// measured without the caches inside, and worktrees without caches are
+    /// still listed so you can see what they take.
+    @Test func measuresWorktreeCheckouts() throws {
+        guard let git = BuildCacheScanner.gitPath else { return }
+        let root = (NSTemporaryDirectory() as NSString).appendingPathComponent("wtp-worktrees-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(atPath: root) }
+        func write(_ path: String, bytes: Int) throws {
+            let url = URL(fileURLWithPath: root + "/" + path)
+            try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+            try String(repeating: "x", count: bytes).write(to: url, atomically: false, encoding: .utf8)
+        }
+        func run(_ arguments: String...) throws {
+            let process = Process()
+            process.executableURL = URL(fileURLWithPath: git)
+            process.arguments = ["-C", root + "/shop", "-c", "user.name=t", "-c", "user.email=t@t", "-c", "core.hooksPath=/dev/null"] + arguments
+            process.standardOutput = FileHandle.nullDevice
+            process.standardError = FileHandle.nullDevice
+            try process.run()
+            process.waitUntilExit()
+            #expect(process.terminationStatus == 0, "git \(arguments.joined(separator: " "))")
+        }
+        try write("shop/package.json", bytes: 2)
+        try write("shop/src/app.ts", bytes: 16 * 1024)
+        try run("init", "-q")
+        try run("add", ".")
+        try run("commit", "-qm", "init")
+        try run("worktree", "add", "-q", "-b", "cart", root + "/shop-cart")
+        try run("worktree", "add", "-q", "-b", "search", root + "/shop-search")
+        try write("shop-cart/node_modules/pkg/index.js", bytes: 256 * 1024)
+        try write("shop-search/assets/hero.png", bytes: 128 * 1024)
+
+        let projects = BuildCacheScanner.scan(roots: [root])
+        let cart = try #require(projects.first { $0.name == "shop-cart" })
+        let search = try #require(projects.first { $0.name == "shop-search" })
+        #expect(cart.repository == "shop" && search.repository == "shop")
+        #expect(cart.repositoryRoot.map { ($0 as NSString).lastPathComponent } == "shop")
+        // The checkout leaves out node_modules, which is counted as a cache.
+        let cartCheckout = try #require(cart.checkout)
+        #expect(cartCheckout.reclaimable >= 16 * 1024 && cartCheckout.reclaimable < 128 * 1024)
+        #expect(cart.reclaimable >= 256 * 1024)
+        // No caches, but its files still take space.
+        #expect(search.artifacts.isEmpty && search.checkoutBytes >= 128 * 1024)
+        // The main repository has neither.
+        #expect(!projects.contains { $0.name == "shop" })
+
+        // Unchanged worktrees keep their measurement.
+        var reuse: [String: WorktreeCheckout] = [:]
+        for project in projects { if var checkout = project.checkout { checkout.reclaimable = 7; reuse[project.root] = checkout } }
+        let again = BuildCacheScanner.scan(roots: [root], reuseCheckouts: reuse)
+        #expect(again.compactMap(\.checkout).allSatisfy { $0.reclaimable == 7 })
+    }
+
+    /// A repository and its worktrees share one row, placed by everything they take.
+    @Test func groupsWorktreesWithTheirRepository() {
+        func project(_ root: String, caches: UInt64, checkout: UInt64? = nil, repository: String? = nil) -> CacheProject {
+            let artifacts = caches == 0 ? [] : [BuildArtifact(path: root + "/node_modules", kind: .nodeModules, size: caches, reclaimable: caches, modified: .distantPast)]
+            return CacheProject(root: root, name: (root as NSString).lastPathComponent, repository: repository.map { ($0 as NSString).lastPathComponent },
+                                repositoryRoot: repository, branch: nil, lastUsed: .distantPast, artifacts: artifacts,
+                                checkout: checkout.map { WorktreeCheckout(reclaimable: $0, stamp: nil) })
+        }
+        let projects = [
+            project("/p/shop", caches: 500),
+            project("/p/blog", caches: 400),
+            project("/p/shop-a", caches: 10, checkout: 300, repository: "/p/shop"),
+            project("/p/shop-b", caches: 0, checkout: 300, repository: "/p/shop"),
+            project("/p/solo-a", caches: 0, checkout: 100, repository: "/p/solo"),
+        ]
+        let items = CacheRowItem.items(projects.sorted(by: CacheProject.largerFirst))
+        #expect(items.map(\.id) == ["worktrees:/p/shop", "/p/blog", "/p/solo-a"])
+        guard case .worktrees(let shop) = items[0] else { return #expect(Bool(false)) }
+        #expect(shop.main?.root == "/p/shop" && shop.members.map(\.root) == ["/p/shop", "/p/shop-a", "/p/shop-b"])
+        #expect(shop.reclaimable == 510 && shop.checkoutBytes == 600)
+        #expect(items[0].segments == [.kind(.nodeModules), .worktrees] && items[1].segments == [.kind(.nodeModules)])
+    }
+
     @MainActor @Test func keepsOutermostFolders() {
         #expect(BuildCacheStore.outermost(["/a/b", "/a", "/c/", "/A", "/ab"]) == ["/a", "/ab", "/c"])
     }

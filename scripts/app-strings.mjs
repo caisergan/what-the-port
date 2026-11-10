@@ -25,6 +25,9 @@ const KEYS = [
   'untouched %@', 'used %@ ago', 'Show folders', '%@ · %d folders', '%@ shared', 'Nothing to clean', 'No build caches in %@',
   'Select unused', 'Clear', 'Delete caches', 'Free %@', 'Delete %d %@', 'Web builds', 'Python envs', 'Python caches',
   'Deleted folders are gone for good. Your tools recreate them on the next install or build.',
+  'Worktrees', 'Worktree checkouts', 'worktree', 'worktrees', 'worktrees (few)', '%@ in %d %@', '%@ checkout',
+  'Show worktrees', 'No build caches', "Worktree checkouts · %@. Removing a worktree frees it; deleting caches doesn't.",
+  "Checkouts take %@: the worktrees' own files. Deleting caches leaves them; removing worktrees you no longer need frees them.",
   'Freed %@ of %@', '%d of %d', 'Cancel %d queued', "Puts the folders that haven't started back in the list.",
 ]
 

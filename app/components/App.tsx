@@ -7,17 +7,25 @@ import { type AppLanguageCode, type Localizer, localizer } from './languages'
 import { GET_IT, TERMINAL } from './sections'
 import {
   type Artifact,
+  type CacheProject,
+  type CacheRow,
   type Kind,
   CACHE_PROJECTS,
   DISK_FREE,
   DISK_TOTAL,
   KINDS,
+  STALE_DAYS,
+  WORKTREE_COLOR,
+  cacheRows,
+  checkouts,
   formatDisk,
   formatDiskTotal,
   isPhrase,
-  isStale,
   kindColor,
   reclaimable,
+  rowArtifacts,
+  rowCheckouts,
+  rowMembers,
   suggestedCaches,
 } from './caches'
 import {
@@ -940,9 +948,45 @@ const checkState = (artifacts: Artifact[], selection: string[]) => {
   return count === 0 ? 'off' : count === artifacts.length ? 'on' : 'mixed'
 }
 
+// One worktree (or the main repository) in an expanded repository row:
+// WorktreeGroupRow.memberRow in BuildCachesView.swift.
+function WorktreeLine({ member, detail, open, demo, l }: { member: CacheProject; detail: string; open: boolean; demo: Demo; l: Localizer }) {
+  const hasCaches = member.artifacts.length > 0
+  const toggle = () => demo.toggleCaches(member.artifacts.map((a) => a.id))
+  return (
+    <div
+      role="button"
+      tabIndex={open && hasCaches ? 0 : -1}
+      className={styles.cacheGroup}
+      onClick={toggle}
+      onKeyDown={(e) => {
+        if (e.key === 'Enter' || e.key === ' ') {
+          e.preventDefault()
+          toggle()
+        }
+      }}
+    >
+      <span className={styles.cacheCheck} data-empty={!hasCaches}>
+        <Check state={hasCaches ? checkState(member.artifacts, demo.cacheSelection) : 'off'} small />
+      </span>
+      <span className={`${styles.mono} ${styles.ellipsis}`}>{member.name}</span>
+      {member.port && (
+        <span className={styles.cacheServer} title={l.format('Server on %@', `:${member.port}`)}>
+          ⚡︎
+        </span>
+      )}
+      <span className={styles.t3}>{detail}</span>
+      <span className={`${styles.mono} ${styles.t2} ${styles.cacheGroupSize}`} data-empty={!hasCaches}>
+        {hasCaches ? formatDisk(reclaimable(member.artifacts)) : '–'}
+      </span>
+    </div>
+  )
+}
+
 // Build caches: like BuildCachesView.swift. Deleting is simulated.
 function CachesView({ demo, l }: { demo: Demo; l: Localizer }) {
-  const [focus, setFocus] = useState<Kind | null>(null)
+  // A kind of cache, or the worktrees' checkouts (CacheFocus).
+  const [focus, setFocus] = useState<Kind | 'worktrees' | null>(null)
   const [hoveredRow, setHoveredRow] = useState<string | null>(null)
   const [expanded, setExpanded] = useState<string[]>([])
   const [confirming, setConfirming] = useState(false)
@@ -955,10 +999,12 @@ function CachesView({ demo, l }: { demo: Demo; l: Localizer }) {
     ...p,
     artifacts: p.artifacts.filter((a) => !demo.removedCaches.includes(a.id)).sort((a, b) => b.reclaimable - a.reclaimable),
   }))
-    .filter((p) => p.artifacts.length)
-    .sort((a, b) => reclaimable(b.artifacts) - reclaimable(a.artifacts))
+    .filter((p) => p.artifacts.length || p.checkout)
+  const rows = cacheRows(projects)
   const artifacts = projects.flatMap((p) => p.artifacts)
   const total = reclaimable(artifacts)
+  const checkoutTotal = checkouts(projects)
+  const worktreeCount = projects.filter((p) => p.checkout !== undefined).length
   const removedMb = reclaimable(CACHE_PROJECTS.flatMap((p) => p.artifacts).filter((a) => demo.removedCaches.includes(a.id)))
   const jobs = demo.cacheJobs
   const jobMb = (state: CacheJob['state']) => reclaimable(CACHE_ARTIFACTS.filter((a) => jobs.some((j) => j.id === a.id && j.state === state)))
@@ -968,7 +1014,7 @@ function CachesView({ demo, l }: { demo: Demo; l: Localizer }) {
   const queueMb = jobMb('done') + deletingMb + jobMb('queued')
   // Like the app, free space grows as each folder finishes.
   const free = DISK_FREE + removedMb - deletingMb - jobMb('queued')
-  const other = DISK_TOTAL - free - total
+  const other = DISK_TOTAL - free - total - checkoutTotal
   const kinds = KINDS.map((kind) => ({ kind, mb: reclaimable(artifacts.filter((a) => a.kind === kind)) }))
     .filter((k) => k.mb > 0)
     .sort((a, b) => b.mb - a.mb)
@@ -976,9 +1022,32 @@ function CachesView({ demo, l }: { demo: Demo; l: Localizer }) {
   const selectedMb = reclaimable(selected)
   const selectedFolders = selected.reduce((sum, a) => sum + (a.count ?? 1), 0)
   const suggestion = suggestedCaches(demo.removedCaches)
-  const lit = hoveredRow ? new Set(projects.find((p) => p.name === hoveredRow)?.artifacts.map((a) => a.kind)) : null
-  const [value, unit] = formatTotal(focus ? reclaimable(artifacts.filter((a) => a.kind === focus)) : total).split(' ')
-  const focusCount = focus ? artifacts.filter((a) => a.kind === focus).length : 0
+  // The disk bar segments a row contributes to (CacheRowItem.segments).
+  const segments = (row: CacheRow) =>
+    new Set<Kind | 'worktrees'>([...rowArtifacts(row).map((a) => a.kind), ...(rowCheckouts(row) > 0 ? ['worktrees' as const] : [])])
+  const hovered = rows.find((row) => row.id === hoveredRow)
+  const lit = hovered ? segments(hovered) : null
+  const focusMb = focus === 'worktrees' ? checkoutTotal : focus ? reclaimable(artifacts.filter((a) => a.kind === focus)) : total
+  const [value, unit] = formatTotal(focusMb).split(' ')
+  const focusCount = focus === 'worktrees' ? worktreeCount : focus ? artifacts.filter((a) => a.kind === focus).length : 0
+  const checkoutsHelp = (mb: number) =>
+    l.format(
+      "Checkouts take %@: the worktrees' own files. Deleting caches leaves them; removing worktrees you no longer need frees them.",
+      formatDisk(mb),
+    )
+  const kindsOf = (items: Artifact[]) => {
+    const labels = KINDS.map((kind) => ({ kind, mb: reclaimable(items.filter((a) => a.kind === kind)) }))
+      .filter((k) => items.some((a) => a.kind === k.kind))
+      .sort((a, b) => b.mb - a.mb)
+      .map((k) => label(k.kind))
+    return labels.length > 3 ? `${labels.slice(0, 2).join(', ')} +${labels.length - 2}` : labels.join(', ')
+  }
+  const ageText = (lastUsed: number) =>
+    lastUsed >= STALE_DAYS * 1440
+      ? l.format('untouched %@', l.duration(lastUsed, true))
+      : l.format('used %@ ago', l.duration(lastUsed, true))
+  const toggleExpanded = (id: string, open: boolean) =>
+    setExpanded((current) => (open ? current.filter((n) => n !== id) : [...current, id]))
 
   const rescan = () => {
     setScanning(true)
@@ -996,8 +1065,8 @@ function CachesView({ demo, l }: { demo: Demo; l: Localizer }) {
         {focus ? (
           <div className={styles.popTitleRow}>
             <span className={styles.kindTitle}>
-              <i style={{ background: kindColor(focus) }} />
-              <span className={styles.popTitle}>{label(focus)}</span>
+              <i style={{ background: focus === 'worktrees' ? WORKTREE_COLOR : kindColor(focus) }} />
+              <span className={styles.popTitle}>{focus === 'worktrees' ? l.text('Worktree checkouts') : label(focus)}</span>
             </span>
           </div>
         ) : (
@@ -1007,7 +1076,9 @@ function CachesView({ demo, l }: { demo: Demo; l: Localizer }) {
           <span className={styles.popBig}>{value}</span>
           <span className={styles.popUnit}>{unit}</span>
           <span className={styles.summaryDetail}>
-            {focus ? (
+            {focus === 'worktrees' ? (
+              <span className={styles.t2}>{l.format('%d %@', focusCount, l.counted('worktree', 'worktrees', focusCount))}</span>
+            ) : focus ? (
               <span className={styles.t2}>{l.format('%d %@', focusCount, l.counted('folder', 'folders', focusCount))}</span>
             ) : running ? (
               <span className={`${styles.cleanupStatus} ${styles.t2}`}>
@@ -1054,6 +1125,22 @@ function CachesView({ demo, l }: { demo: Demo; l: Localizer }) {
               onClick={() => demo.toggleCaches(artifacts.filter((a) => a.kind === kind).map((a) => a.id))}
             />
           ))}
+          {checkoutTotal > 0 && (
+            <span
+              tabIndex={0}
+              className={styles.memorySegment}
+              style={{ flexGrow: checkoutTotal, color: WORKTREE_COLOR }}
+              data-raised
+              data-focused={focus === 'worktrees'}
+              data-dim={(focus !== null && focus !== 'worktrees') || (lit !== null && !lit.has('worktrees'))}
+              aria-label={l.format("Worktree checkouts · %@. Removing a worktree frees it; deleting caches doesn't.", formatDisk(checkoutTotal))}
+              title={l.format("Worktree checkouts · %@. Removing a worktree frees it; deleting caches doesn't.", formatDisk(checkoutTotal))}
+              onMouseEnter={() => setFocus('worktrees')}
+              onMouseLeave={() => setFocus(null)}
+              onFocus={() => setFocus('worktrees')}
+              onBlur={() => setFocus(null)}
+            />
+          )}
           <span
             className={styles.memorySegment}
             style={{ flexGrow: other }}
@@ -1066,10 +1153,18 @@ function CachesView({ demo, l }: { demo: Demo; l: Localizer }) {
             <i data-servers />
             {l.text('Caches')} <b>{formatTotal(total)}</b>
           </span>
-          <span className={styles.legendShrink}>
-            <i />
-            {l.text('Other')} <b>{formatDiskTotal(other)}</b>
-          </span>
+          {checkoutTotal > 0 ? (
+            // Like the app, Other makes room for Worktrees when they don't all fit.
+            <span title={checkoutsHelp(checkoutTotal)}>
+              <i style={{ height: 8, background: WORKTREE_COLOR }} />
+              {l.text('Worktrees')} <b>{formatTotal(checkoutTotal)}</b>
+            </span>
+          ) : (
+            <span className={styles.legendShrink}>
+              <i />
+              {l.text('Other')} <b>{formatDiskTotal(other)}</b>
+            </span>
+          )}
           <span>
             <i data-free />
             {l.text('Free')} <b>{l.format('%@ of %@', formatDiskTotal(free).split(' ')[0], formatDiskTotal(DISK_TOTAL))}</b>
@@ -1086,23 +1181,29 @@ function CachesView({ demo, l }: { demo: Demo; l: Localizer }) {
             <span className={`${styles.caption} ${styles.t3}`}>{l.format('No build caches in %@', '~/Code')}</span>
           </div>
         )}
-        {projects.map((project) => {
-          const open = expanded.includes(project.name)
-          const kindTotals = KINDS.map((kind) => ({ kind, mb: reclaimable(project.artifacts.filter((a) => a.kind === kind)) }))
-            .filter((k) => project.artifacts.some((a) => a.kind === k.kind))
-            .sort((a, b) => b.mb - a.mb)
-            .map((k) => label(k.kind))
-          const kindText = kindTotals.length > 3 ? `${kindTotals.slice(0, 2).join(', ')} +${kindTotals.length - 2}` : kindTotals.join(', ')
-          const age = isStale(project)
-            ? l.format('untouched %@', l.duration(project.lastUsed, true))
-            : l.format('used %@ ago', l.duration(project.lastUsed, true))
-          const toggle = () => demo.toggleCaches(project.artifacts.map((a) => a.id))
+        {rows.map((row) => {
+          const open = expanded.includes(row.id)
+          const members = rowMembers(row)
+          const items = rowArtifacts(row)
+          const hasCaches = items.length > 0
+          const ports = members.map((m) => m.port).filter((port): port is string => !!port)
+          const toggle = () => demo.toggleCaches(items.map((a) => a.id))
+          const group = row.group
+          // The row's own project; a repository row has its members instead.
+          const project = row.project ?? members[0]
+          const caption = group
+            ? l.format('%@ in %d %@', formatDisk(rowCheckouts(row)), group.worktrees.length, l.counted('worktree', 'worktrees', group.worktrees.length))
+            : project.repository && !hasCaches && project.checkout !== undefined
+              ? `${l.format('%@ checkout', formatDisk(project.checkout))} · ${l.format('%@ worktree', project.repository)}`
+              : `${project.repository ? `${l.format('%@ worktree', project.repository)} · ` : ''}${kindsOf(items)}`
+          const age = ageText(Math.min(...members.map((m) => m.lastUsed)))
+          const name = group ? group.name : project.name
           return (
             <div
-              key={project.name}
+              key={row.id}
               className={styles.cacheProject}
-              data-dim={focus !== null && !project.artifacts.some((a) => a.kind === focus)}
-              onMouseEnter={() => setHoveredRow(project.name)}
+              data-dim={focus !== null && !segments(row).has(focus)}
+              onMouseEnter={() => setHoveredRow(row.id)}
               onMouseLeave={() => setHoveredRow(null)}
             >
               <div
@@ -1110,8 +1211,8 @@ function CachesView({ demo, l }: { demo: Demo; l: Localizer }) {
                 tabIndex={0}
                 className={styles.serverRow}
                 data-interactive
-                aria-pressed={checkState(project.artifacts, demo.cacheSelection) === 'on'}
-                aria-label={`Select caches in ${project.name}`}
+                aria-pressed={hasCaches && checkState(items, demo.cacheSelection) === 'on'}
+                aria-label={`Select caches in ${name}`}
                 onClick={toggle}
                 onKeyDown={(e) => {
                   if (e.target === e.currentTarget && (e.key === 'Enter' || e.key === ' ')) {
@@ -1120,70 +1221,86 @@ function CachesView({ demo, l }: { demo: Demo; l: Localizer }) {
                   }
                 }}
               >
-                <Check state={checkState(project.artifacts, demo.cacheSelection)} />
+                <span className={styles.cacheCheck} data-empty={!hasCaches}>
+                  <Check state={hasCaches ? checkState(items, demo.cacheSelection) : 'off'} />
+                </span>
                 <span className={styles.rowMain}>
-                  <span className={styles.rowName} title={project.name}>
-                    {project.name}
+                  <span className={styles.rowName} title={name}>
+                    {name}
                   </span>
-                  <span className={styles.rowSub} style={{ color: '#EBEBF599' }}>
-                    {project.port && (
+                  <span className={styles.rowSub} style={{ color: '#EBEBF599' }} title={group ? checkoutsHelp(rowCheckouts(row)) : undefined}>
+                    {ports.length > 0 && (
                       <>
-                        <span className={styles.cacheServer}>⚡︎ {l.format('Server on %@', `:${project.port}`)}</span>
+                        <span className={styles.cacheServer}>⚡︎ {l.format('Server on %@', ports.map((port) => `:${port}`).join(' '))}</span>
                         <span>·</span>
                       </>
                     )}
-                    <span className={styles.ellipsis}>
-                      {project.repository ? `${l.format('%@ worktree', project.repository)} · ` : ''}
-                      {kindText}
-                    </span>
+                    <span className={group ? styles.cacheAge : styles.ellipsis}>{caption}</span>
                     <span>·</span>
-                    <span className={styles.cacheAge}>{age}</span>
+                    <span className={group ? styles.ellipsis : styles.cacheAge}>{age}</span>
                   </span>
                 </span>
-                <span className={styles.rowMemory}>{formatDisk(reclaimable(project.artifacts))}</span>
-                <button
-                  type="button"
-                  className={styles.cacheChevron}
-                  data-open={open}
-                  aria-expanded={open}
-                  aria-label={l.text(open ? 'Less' : 'Show folders')}
-                  title={l.text(open ? 'Less' : 'Show folders')}
-                  onClick={(e) => {
-                    e.stopPropagation()
-                    setExpanded((current) => (open ? current.filter((n) => n !== project.name) : [...current, project.name]))
-                  }}
-                >
-                  <Chevron direction="down" />
-                </button>
+                <span className={styles.rowMemory} data-empty={!hasCaches} title={hasCaches ? undefined : l.text('No build caches')}>
+                  {hasCaches ? formatDisk(reclaimable(items)) : '–'}
+                </span>
+                {hasCaches || group ? (
+                  <button
+                    type="button"
+                    className={styles.cacheChevron}
+                    data-open={open}
+                    aria-expanded={open}
+                    aria-label={l.text(open ? 'Less' : group ? 'Show worktrees' : 'Show folders')}
+                    title={l.text(open ? 'Less' : group ? 'Show worktrees' : 'Show folders')}
+                    onClick={(e) => {
+                      e.stopPropagation()
+                      toggleExpanded(row.id, open)
+                    }}
+                  >
+                    <Chevron direction="down" />
+                  </button>
+                ) : (
+                  <span className={styles.cacheChevron} aria-hidden />
+                )}
               </div>
               <div className={styles.collapsible} data-open={open}>
                 <div>
-                  {[...project.artifacts]
-                    .sort((a, b) => b.reclaimable - a.reclaimable)
-                    .map((a) => (
-                      <div
-                        key={a.id}
-                        role="button"
-                        tabIndex={open ? 0 : -1}
-                        className={styles.cacheGroup}
-                        onClick={() => demo.toggleCaches([a.id])}
-                        onKeyDown={(e) => {
-                          if (e.key === 'Enter' || e.key === ' ') {
-                            e.preventDefault()
-                            demo.toggleCaches([a.id])
-                          }
-                        }}
-                      >
-                        <Check state={checkState([a], demo.cacheSelection)} small />
-                        <span className={`${styles.mono} ${styles.ellipsis}`}>
-                          {a.count ? l.format('%@ · %d folders', a.path, a.count) : a.path}
-                        </span>
-                        {a.size > a.reclaimable * 2 && (
-                          <span className={styles.t3}>{l.format('%@ shared', formatDisk(a.size - a.reclaimable))}</span>
-                        )}
-                        <span className={`${styles.mono} ${styles.t2} ${styles.cacheGroupSize}`}>{formatDisk(a.reclaimable)}</span>
-                      </div>
-                    ))}
+                  {group
+                    ? members.map((member) => (
+                        <WorktreeLine
+                          key={member.name}
+                          member={member}
+                          detail={member.checkout !== undefined ? l.format('%@ checkout', formatDisk(member.checkout)) : kindsOf(member.artifacts)}
+                          open={open}
+                          demo={demo}
+                          l={l}
+                        />
+                      ))
+                    : [...project.artifacts]
+                        .sort((a, b) => b.reclaimable - a.reclaimable)
+                        .map((a) => (
+                          <div
+                            key={a.id}
+                            role="button"
+                            tabIndex={open ? 0 : -1}
+                            className={styles.cacheGroup}
+                            onClick={() => demo.toggleCaches([a.id])}
+                            onKeyDown={(e) => {
+                              if (e.key === 'Enter' || e.key === ' ') {
+                                e.preventDefault()
+                                demo.toggleCaches([a.id])
+                              }
+                            }}
+                          >
+                            <Check state={checkState([a], demo.cacheSelection)} small />
+                            <span className={`${styles.mono} ${styles.ellipsis}`}>
+                              {a.count ? l.format('%@ · %d folders', a.path, a.count) : a.path}
+                            </span>
+                            {a.size > a.reclaimable * 2 && (
+                              <span className={styles.t3}>{l.format('%@ shared', formatDisk(a.size - a.reclaimable))}</span>
+                            )}
+                            <span className={`${styles.mono} ${styles.t2} ${styles.cacheGroupSize}`}>{formatDisk(a.reclaimable)}</span>
+                          </div>
+                        ))}
                 </div>
               </div>
             </div>

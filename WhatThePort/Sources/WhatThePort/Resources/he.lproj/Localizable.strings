@@ -353,3 +353,15 @@
 "folders (few)" = "תיקיות";
 "untouched %@" = "ללא שימוש %@";
 "used %@ ago" = "בשימוש לפני %@";
+"worktree" = "worktree";
+"worktrees" = "worktrees";
+"worktrees (few)" = "worktrees";
+"Worktrees" = "Worktrees";
+"Worktree checkouts" = "קבצי ה-worktrees";
+"Worktree checkouts · %@. Removing a worktree frees it; deleting caches doesn't." = "קבצי ה-worktrees · %@. הסרת worktree משחררת אותם; מחיקת מטמונים לא.";
+"%@ checkout" = "%@ קבצי worktree";
+"Show worktrees" = "הצגת worktrees";
+"No build caches" = "אין מטמוני בנייה";
+"Its checkout takes another %@: the worktree's own files. Deleting caches leaves them; removing the worktree frees them." = "הקבצים שלו תופסים עוד %@: הקבצים של ה-worktree עצמו. מחיקת מטמונים משאירה אותם; הסרת ה-worktree משחררת אותם.";
+"Checkouts take %@: the worktrees' own files. Deleting caches leaves them; removing worktrees you no longer need frees them." = "הקבצים תופסים %@: הקבצים של ה-worktrees עצמם. מחיקת מטמונים משאירה אותם; הסרת worktrees שכבר לא צריך משחררת אותם.";
+"%@ in %d %@" = "%@ ב-%d %@";
