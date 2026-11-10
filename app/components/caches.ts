@@ -19,12 +19,16 @@ export const isPhrase = (kind: Kind) => PHRASES.includes(kind)
 
 export type Artifact = { id: string; path: string; kind: Kind; size: number; reclaimable: number; count?: number }
 
+export type WorktreeStatus = { changes?: number; untracked?: string[]; secrets?: string[]; unpushed?: number }
+
 export type CacheProject = {
   name: string
   /// The main repository, for linked worktrees.
   repository?: string
   /// A linked worktree's own files, outside its caches.
   checkout?: number
+  /// What git says removing the worktree would lose (WorktreeStatus).
+  status?: WorktreeStatus
   /// Port of a demo server running in it.
   port?: string
   /// Minutes since it was last used.
@@ -56,6 +60,7 @@ export const CACHE_PROJECTS: CacheProject[] = [
     name: 'checkout-redesign',
     repository: 'storefront',
     checkout: 312,
+    status: { unpushed: 2 },
     lastUsed: 23 * 1440,
     artifacts: [
       artifact('checkout-redesign/.next', 'apps/web/.next', '.next', 2310),
@@ -119,9 +124,16 @@ export const CACHE_PROJECTS: CacheProject[] = [
     ],
   },
   // Worktrees an agent left behind: no caches, but their checkouts still take space.
-  { name: 'pdp-gallery', repository: 'storefront', checkout: 318, lastUsed: 47 * 1440, artifacts: [] },
-  { name: 'gift-cards', repository: 'storefront', checkout: 305, lastUsed: 31 * 1440, artifacts: [] },
-  { name: 'search-filters', repository: 'storefront', checkout: 297, lastUsed: 9 * 1440, artifacts: [] },
+  {
+    name: 'pdp-gallery',
+    repository: 'storefront',
+    checkout: 318,
+    status: { untracked: ['AGENTS.md'], secrets: ['.env'] },
+    lastUsed: 47 * 1440,
+    artifacts: [],
+  },
+  { name: 'gift-cards', repository: 'storefront', checkout: 305, status: {}, lastUsed: 31 * 1440, artifacts: [] },
+  { name: 'search-filters', repository: 'storefront', checkout: 297, status: { changes: 3 }, lastUsed: 9 * 1440, artifacts: [] },
 ]
 
 // A 494 GB Mac with 38 GB free, as Finder counts it.
@@ -195,3 +207,15 @@ export function formatDiskTotal(mb: number) {
 
 /** Worktree checkouts on the disk bar (Theme.worktreeCheckout): neutral, since they aren't caches. */
 export const WORKTREE_COLOR = '#EBEBF56B'
+
+/** Removing a worktree is queued under this id, next to artifact ids. */
+export const worktreeId = (project: CacheProject) => `worktree:${project.name}`
+export const isWorktreeId = (id: string) => id.startsWith('worktree:')
+export const worktreeOf = (id: string) => CACHE_PROJECTS.find((p) => worktreeId(p) === id)
+
+/** What removing the worktree frees: its checkout and the caches still in it. */
+export const worktreeFootprint = (project: CacheProject, removed: string[] = []) =>
+  (project.checkout ?? 0) + reclaimable(project.artifacts.filter((a) => !removed.includes(a.id)))
+
+export const hasWarnings = (status?: WorktreeStatus) =>
+  !!status && (!!status.untracked?.length || !!status.secrets?.length || (status.unpushed ?? 0) > 0)

@@ -13,6 +13,8 @@ struct BuildCachesView: View {
     private let maxVisibleRows = 7
     /// Selected artifact paths.
     @State private var selection: Set<String>
+    /// Linked worktrees picked to be removed whole, by root.
+    @State private var worktreeSelection: Set<String> = []
     /// Expanded row ids.
     @State private var expanded: Set<String> = []
     /// The segment under the pointer in the disk bar.
@@ -37,6 +39,12 @@ struct BuildCachesView: View {
         _hasSuggested = State(initialValue: ready)
         _expanded = State(initialValue: expandFirst ? Set(CacheRowItem.items(monitor.caches.projects).prefix(1).map(\.id)) : [])
         _confirming = State(initialValue: confirm)
+        // The confirm snapshot also picks a few worktrees, to show what removing them warns about.
+        if confirm, case .worktrees(let group)? = CacheRowItem.items(monitor.caches.projects).first {
+            let statuses = monitor.caches.worktreeStatuses
+            _worktreeSelection = State(initialValue: Set(group.worktrees.filter { statuses[$0.root].map { $0.blocker == nil } ?? false }
+                .prefix(3).map(\.root)))
+        }
     }
 
     var body: some View {
@@ -58,6 +66,7 @@ struct BuildCachesView: View {
             guard !scanning else { return }
             disk = DiskSpace.current()
             let paths = Set(store.projects.flatMap(\.artifacts).map(\.path))
+            worktreeSelection.formIntersection(store.projects.filter { $0.checkout != nil }.map(\.root))
             if hasSuggested {
                 selection.formIntersection(paths)
             } else {
@@ -66,13 +75,29 @@ struct BuildCachesView: View {
             }
         }
         .onChange(of: store.cleanup?.finished) { _, _ in disk = DiskSpace.current() }
+        // A worktree that git now says must be kept, or that a server started in, is unpicked.
+        .onChange(of: store.worktreeStatuses) { _, statuses in
+            let ports = serverPorts
+            worktreeSelection = worktreeSelection.filter {
+                WorktreeLine.blockerText(status: statuses[$0], ports: ports[$0] ?? []) == nil
+            }
+        }
     }
 
     private var artifacts: [BuildArtifact] { store.projects.flatMap(\.artifacts) }
 
-    private var selectedArtifacts: [BuildArtifact] { artifacts.filter { selection.contains($0.path) } }
+    /// Picked folders, leaving out those inside picked worktrees: they go with them.
+    private var selectedArtifacts: [BuildArtifact] {
+        store.projects.filter { !worktreeSelection.contains($0.root) }.flatMap(\.artifacts).filter { selection.contains($0.path) }
+    }
 
-    private var selectedBytes: UInt64 { selectedArtifacts.reduce(0) { $0 + $1.reclaimable } }
+    private var selectedWorktrees: [CacheProject] { store.projects.filter { worktreeSelection.contains($0.root) } }
+
+    private var selectedBytes: UInt64 {
+        selectedArtifacts.reduce(0) { $0 + $1.reclaimable } + selectedWorktrees.reduce(0) { $0 + $1.footprint }
+    }
+
+    private var hasSelection: Bool { !selection.isEmpty || !worktreeSelection.isEmpty }
 
     // MARK: - Summary
 
@@ -185,6 +210,13 @@ struct BuildCachesView: View {
                     if hovering { hoveredRow = id } else if hoveredRow == id { hoveredRow = nil }
                 }
                 let expand = {
+                    // Git is asked what each worktree would lose once you look at them.
+                    if !expanded.contains(id) {
+                        switch item {
+                        case .project(let project): store.checkWorktrees([project])
+                        case .worktrees(let group): store.checkWorktrees(group.worktrees)
+                        }
+                    }
                     withAnimation(.snappy(duration: 0.2)) {
                         if expanded.contains(id) { expanded.remove(id) } else { expanded.insert(id) }
                     }
@@ -194,11 +226,18 @@ struct BuildCachesView: View {
                 case .project(let project):
                     CacheProjectRow(project: project, selection: selection, ports: ports[project.root] ?? [],
                                     isStale: store.isStale(project), isExpanded: expanded.contains(id),
-                                    isDimmed: isDimmed, onHover: onHover, toggle: toggle, expand: expand)
+                                    isDimmed: isDimmed, isWorktreeSelected: worktreeSelection.contains(project.root),
+                                    status: store.worktreeStatuses[project.root], onHover: onHover, toggle: toggle,
+                                    toggleWorktree: { toggleWorktree(project) }, expand: expand)
                 case .worktrees(let group):
-                    WorktreeGroupRow(group: group, selection: selection, ports: ports, staleAfter: store.staleAfter,
+                    WorktreeGroupRow(group: group, selection: selection, worktreeSelection: worktreeSelection,
+                                     statuses: store.worktreeStatuses, ports: ports, staleAfter: store.staleAfter,
                                      isExpanded: expanded.contains(id), isDimmed: isDimmed,
-                                     onHover: onHover, toggle: toggle, expand: expand)
+                                     onHover: onHover, toggle: toggle, toggleWorktree: toggleWorktree,
+                                     pickWorktrees: { worktrees in
+                                         withAnimation(.snappy(duration: 0.15)) { worktreeSelection.formUnion(worktrees.map(\.root)) }
+                                     },
+                                     expand: expand)
                 }
             }
         }
@@ -248,22 +287,29 @@ struct BuildCachesView: View {
     @ViewBuilder private var footer: some View {
         if confirming {
             VStack(alignment: .leading, spacing: 10) {
-                Text(L10n.text("Deleted folders are gone for good. Your tools recreate them on the next install or build."))
-                    .font(Theme.caption).foregroundStyle(Theme.text2)
-                    .fixedSize(horizontal: false, vertical: true)
+                if !selectedArtifacts.isEmpty {
+                    Text(L10n.text("Deleted folders are gone for good. Your tools recreate them on the next install or build."))
+                        .font(Theme.caption).foregroundStyle(Theme.text2)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                if !selectedWorktrees.isEmpty {
+                    worktreeWarnings
+                }
                 HStack(spacing: 8) {
                     Button(L10n.text("Cancel")) { withAnimation(.snappy(duration: 0.2)) { confirming = false } }
                         .buttonStyle(PillButtonStyle())
                         .keyboardShortcut(.cancelAction)
                     Button {
                         Usage.record(.deleteCaches)
-                        store.delete(selection)
+                        store.delete(selection, worktrees: worktreeSelection)
                         withAnimation(.snappy(duration: 0.25)) {
                             selection = []
+                            worktreeSelection = []
                             confirming = false
                         }
                     } label: {
-                        Text(L10n.format("Delete %d %@", selectedArtifacts.count, L10n.counted("folder", "folders", count: selectedArtifacts.count)))
+                        Text(deleteLabel)
+                            .lineLimit(1)
                             .frame(maxWidth: .infinity)
                     }
                     .buttonStyle(PillButtonStyle(kind: .destructive))
@@ -274,7 +320,7 @@ struct BuildCachesView: View {
             .transition(.opacity)
         } else {
             HStack(spacing: 8) {
-                if selection.isEmpty {
+                if !hasSelection {
                     let count = Self.suggestedSelection(monitor).count
                     Button(L10n.text("Select unused")) {
                         withAnimation(.snappy(duration: 0.15)) { selection = Self.suggestedSelection(monitor) }
@@ -283,7 +329,12 @@ struct BuildCachesView: View {
                     .disabled(count == 0)
                     .help(L10n.format("Caches in projects untouched for %d days, without a running server", Int(store.staleAfter / 86_400)))
                 } else {
-                    Button(L10n.text("Clear")) { withAnimation(.snappy(duration: 0.15)) { selection = [] } }
+                    Button(L10n.text("Clear")) {
+                        withAnimation(.snappy(duration: 0.15)) {
+                            selection = []
+                            worktreeSelection = []
+                        }
+                    }
                         .buttonStyle(PillButtonStyle())
                 }
                 Button {
@@ -291,14 +342,14 @@ struct BuildCachesView: View {
                 } label: {
                     HStack(spacing: 7) {
                         Image(systemName: "trash").font(.system(size: 11, weight: .medium))
-                        Text(selection.isEmpty ? L10n.text("Delete caches") : L10n.format("Free %@", Format.diskBytes(selectedBytes)))
+                        Text(hasSelection ? L10n.format("Free %@", Format.diskBytes(selectedBytes)) : L10n.text("Delete caches"))
                     }
                     .frame(maxWidth: .infinity)
                 }
                 .buttonStyle(PillButtonStyle(kind: .destructive))
-                .disabled(selection.isEmpty)
-                .opacity(selection.isEmpty ? 0.5 : 1)
-                .help(L10n.format("Delete %d %@", selectedArtifacts.count, L10n.counted("folder", "folders", count: selectedArtifacts.count)))
+                .disabled(!hasSelection)
+                .opacity(hasSelection ? 1 : 0.5)
+                .help(deleteLabel)
 
                 Menu {
                     Button(L10n.text("Scan again")) { store.scan(force: true) }
@@ -323,7 +374,61 @@ struct BuildCachesView: View {
         }
     }
 
+    private var deleteLabel: String {
+        let folders = selectedArtifacts.count, worktrees = selectedWorktrees.count
+        let removeWorktrees = L10n.counted("worktree", "worktrees", count: worktrees)
+        if worktrees == 0 { return L10n.format("Delete %d %@", folders, L10n.counted("folder", "folders", count: folders)) }
+        if folders == 0 { return L10n.format("Remove %d %@", worktrees, removeWorktrees) }
+        return L10n.format("Remove %d %@ and delete %d %@", worktrees, removeWorktrees, folders, L10n.counted("folder", "folders", count: folders))
+    }
+
+    /// What removing the picked worktrees deletes, said before it happens.
+    private var worktreeWarnings: some View {
+        let statuses = selectedWorktrees.compactMap { store.worktreeStatuses[$0.root] }
+        let count = selectedWorktrees.count
+        let untracked = statuses.filter { !$0.untracked.isEmpty }.count
+        let secrets = statuses.filter { !$0.secrets.isEmpty }.count
+        let unpushed = statuses.filter { ($0.unpushed ?? 0) > 0 }.count
+        func worktrees(_ count: Int) -> String { L10n.counted("worktree", "worktrees", count: count) }
+        return VStack(alignment: .leading, spacing: 4) {
+            Text(L10n.format("Removes %d %@ with git worktree remove: their files are gone for good, their branches stay.", count, worktrees(count)))
+                .foregroundStyle(Theme.text2)
+            if untracked > 0 {
+                warning(L10n.format("Untracked files in %d %@ will be deleted.", untracked, worktrees(untracked)))
+            }
+            if secrets > 0 {
+                warning(L10n.format(".env or key files in %d %@ will be deleted.", secrets, worktrees(secrets)))
+            }
+            if unpushed > 0 {
+                warning(L10n.format("Commits on no remote in %d %@ stay on their branches.", unpushed, worktrees(unpushed)))
+            }
+            Text(L10n.text("Anything with uncommitted changes is kept."))
+                .foregroundStyle(Theme.text3)
+        }
+        .font(Theme.caption)
+        .fixedSize(horizontal: false, vertical: true)
+    }
+
+    private func warning(_ text: String) -> some View {
+        HStack(alignment: .firstTextBaseline, spacing: 5) {
+            Image(systemName: "exclamationmark.triangle.fill").font(.system(size: 9)).foregroundStyle(Theme.amber)
+            Text(text).foregroundStyle(Theme.text1.opacity(0.85))
+        }
+    }
+
     // MARK: - Selection
+
+    /// Picks or unpicks a whole worktree, and asks git again so its warnings are current.
+    private func toggleWorktree(_ worktree: CacheProject) {
+        withAnimation(.snappy(duration: 0.15)) {
+            if worktreeSelection.contains(worktree.root) {
+                worktreeSelection.remove(worktree.root)
+            } else {
+                worktreeSelection.insert(worktree.root)
+                store.checkWorktrees([worktree], force: true)
+            }
+        }
+    }
 
     private func toggle(_ items: [BuildArtifact]) {
         let paths = Set(items.map(\.path))
@@ -366,13 +471,18 @@ struct CacheProjectRow: View {
     let isStale: Bool
     let isExpanded: Bool
     var isDimmed = false
+    /// For a linked worktree: whether it's picked to be removed whole, and what git says about it.
+    var isWorktreeSelected = false
+    var status: WorktreeStatus?
     var onHover: (Bool) -> Void = { _ in }
     let toggle: ([BuildArtifact]) -> Void
+    var toggleWorktree: () -> Void = {}
     let expand: () -> Void
     @State private var isHovered = false
 
     private var selectedCount: Int { project.artifacts.filter { selection.contains($0.path) }.count }
     private var hasCaches: Bool { !project.artifacts.isEmpty }
+    private var isWorktree: Bool { project.checkout != nil }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -403,7 +513,7 @@ struct CacheProjectRow: View {
 
                 CacheSize(reclaimable: project.reclaimable, size: project.size, checkout: project.checkout, hasCaches: hasCaches)
 
-                if hasCaches {
+                if hasCaches || isWorktree {
                     Button(action: expand) {
                         Image(systemName: isExpanded ? "chevron.up" : "chevron.down")
                             .font(.system(size: 9, weight: .bold))
@@ -423,8 +533,12 @@ struct CacheProjectRow: View {
             .contentShape(Rectangle())
             .onTapGesture { toggle(project.artifacts) }
 
-            if isExpanded && hasCaches {
+            if isExpanded && (hasCaches || isWorktree) {
                 VStack(spacing: 0) {
+                    if isWorktree {
+                        WorktreeLine(worktree: project, status: status, ports: ports, isSelected: isWorktreeSelected,
+                                     label: L10n.text("Whole worktree"), toggle: toggleWorktree)
+                    }
                     ForEach(groups, id: \.name) { group in
                         groupRow(group)
                     }
@@ -677,6 +791,9 @@ enum CacheFocus: Hashable {
 struct WorktreeGroupRow: View {
     let group: WorktreeGroup
     let selection: Set<String>
+    /// Worktrees picked to be removed whole, by root.
+    let worktreeSelection: Set<String>
+    let statuses: [String: WorktreeStatus]
     /// Ports of dev servers by project root.
     let ports: [String: [Int]]
     let staleAfter: TimeInterval
@@ -684,10 +801,22 @@ struct WorktreeGroupRow: View {
     var isDimmed = false
     var onHover: (Bool) -> Void = { _ in }
     let toggle: ([BuildArtifact]) -> Void
+    let toggleWorktree: (CacheProject) -> Void
+    /// Picks these worktrees to be removed, adding to what's picked.
+    var pickWorktrees: ([CacheProject]) -> Void = { _ in }
     let expand: () -> Void
     @State private var isHovered = false
 
     private var artifacts: [BuildArtifact] { group.artifacts }
+
+    /// Worktrees untouched for a while that git says can go, not yet picked.
+    private var untouched: [CacheProject] {
+        group.worktrees.filter { worktree in
+            Date().timeIntervalSince(worktree.lastUsed) >= staleAfter && !worktreeSelection.contains(worktree.root)
+                && statuses[worktree.root] != nil
+                && WorktreeLine.blockerText(status: statuses[worktree.root], ports: ports[worktree.root] ?? []) == nil
+        }
+    }
     private var selectedCount: Int { artifacts.filter { selection.contains($0.path) }.count }
     private var runningPorts: [Int] { group.members.flatMap { ports[$0.root] ?? [] }.sorted() }
 
@@ -738,6 +867,26 @@ struct WorktreeGroupRow: View {
 
             if isExpanded {
                 VStack(spacing: 0) {
+                    let untouched = untouched
+                    if !untouched.isEmpty {
+                        HStack {
+                            Button {
+                                pickWorktrees(untouched)
+                            } label: {
+                                Text(L10n.format("Select %d %@ untouched for %d days", untouched.count,
+                                                 L10n.counted("worktree", "worktrees", count: untouched.count), Int(staleAfter / 86_400)))
+                                    .font(Theme.caption).foregroundStyle(Theme.text1)
+                                    .padding(.horizontal, 8)
+                                    .frame(height: 20)
+                                    .background(Theme.fill, in: RoundedRectangle(cornerRadius: 6, style: .continuous))
+                                    .contentShape(Rectangle())
+                            }
+                            .buttonStyle(.plain)
+                            .help(L10n.text("Worktrees git can remove without losing uncommitted changes. Check the warnings before removing them."))
+                            Spacer()
+                        }
+                        .padding(EdgeInsets(top: 0, leading: 38, bottom: 4, trailing: 30))
+                    }
                     ForEach(group.members) { member in
                         memberRow(member)
                     }
@@ -783,45 +932,139 @@ struct WorktreeGroupRow: View {
         return age >= staleAfter ? L10n.format("untouched %@", L10n.duration(age, short: true)) : L10n.format("used %@ ago", L10n.duration(age, short: true))
     }
 
-    /// One line per worktree with its checkout; the main repository's line names its caches instead.
-    private func memberRow(_ worktree: CacheProject) -> some View {
-        let selected = worktree.artifacts.filter { selection.contains($0.path) }.count
-        let hasCaches = !worktree.artifacts.isEmpty
-        let running = !(ports[worktree.root] ?? []).isEmpty
-        return HStack(spacing: 0) {
-            Checkbox(isOn: hasCaches && selected == worktree.artifacts.count,
-                     isMixed: selected > 0 && selected < worktree.artifacts.count, size: 12)
-                .opacity(hasCaches ? 1 : 0.3)
+    /// One line per worktree, which picks the whole worktree; the main
+    /// repository's line names its caches and picks those instead.
+    @ViewBuilder private func memberRow(_ member: CacheProject) -> some View {
+        if member.checkout != nil {
+            WorktreeLine(worktree: member, status: statuses[member.root], ports: ports[member.root] ?? [],
+                         isSelected: worktreeSelection.contains(member.root)) { toggleWorktree(member) }
+        } else {
+            let selected = member.artifacts.filter { selection.contains($0.path) }.count
+            HStack(spacing: 0) {
+                Checkbox(isOn: selected == member.artifacts.count, isMixed: selected > 0 && selected < member.artifacts.count, size: 12)
+                    .padding(.trailing, 10)
+                Text(member.name)
+                    .font(Theme.monoCaption)
+                    .foregroundStyle(Theme.text1.opacity(0.85))
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                    .help(member.root)
+                Spacer(minLength: 8)
+                Text(cacheKinds(member.artifacts))
+                    .font(Theme.caption).foregroundStyle(Theme.text3)
+                    .lineLimit(1)
+                    .fixedSize()
+                    .padding(.trailing, 8)
+                CacheSize(reclaimable: member.reclaimable, size: member.size, checkout: nil, hasCaches: true,
+                          font: Theme.monoCaption, color: Theme.text2)
+            }
+            .padding(.leading, 38)
+            .padding(.trailing, 30)
+            .frame(height: 24)
+            .contentShape(Rectangle())
+            .onTapGesture { toggle(member.artifacts) }
+            .environment(\.layoutDirection, .leftToRight)
+        }
+    }
+}
+
+/// A linked worktree to remove whole: its checkout and caches go, its branch
+/// stays. git's status decides what it warns about and what it keeps.
+struct WorktreeLine: View {
+    let worktree: CacheProject
+    /// Nil while git is being asked.
+    let status: WorktreeStatus?
+    /// Dev servers running in it, which keep it.
+    let ports: [Int]
+    let isSelected: Bool
+    /// Shown instead of the worktree's name.
+    var label: String?
+    let toggle: () -> Void
+
+    private var reason: String? { Self.blockerText(status: status, ports: ports) }
+    private var canPick: Bool { status != nil && reason == nil }
+
+    var body: some View {
+        HStack(spacing: 0) {
+            Checkbox(isOn: isSelected, size: 12)
+                .opacity(canPick || isSelected ? 1 : 0.3)
                 .padding(.trailing, 10)
-            Text(worktree.name)
-                .font(Theme.monoCaption)
+            Text(label ?? worktree.name)
+                .font(label == nil ? Theme.monoCaption : Theme.caption)
                 .foregroundStyle(Theme.text1.opacity(0.85))
                 .lineLimit(1)
                 .truncationMode(.middle)
-                .help([worktree.root, worktree.branch].compactMap { $0 }.joined(separator: "\n"))
-            if running {
-                Image(systemName: "bolt.fill").font(.system(size: 8)).foregroundStyle(Theme.amber)
-                    .padding(.leading, 5)
-                    .help(L10n.format("Server on %@", (ports[worktree.root] ?? []).map { ":\($0)" }.joined(separator: " ")))
-            }
+                .help([worktree.root, worktree.branch.map { L10n.format("Branch %@", $0) }].compactMap { $0 }.joined(separator: "\n"))
+            indicator.padding(.leading, 5)
             Spacer(minLength: 8)
-            Text(worktree.checkout == nil ? cacheKinds(worktree.artifacts) : L10n.format("%@ checkout", Format.diskBytes(worktree.checkoutBytes)))
+            Text(L10n.format("%@ checkout", Format.diskBytes(worktree.checkoutBytes)))
                 .font(Theme.caption).foregroundStyle(Theme.text3)
                 .lineLimit(1)
                 .fixedSize()
                 .padding(.trailing, 8)
-            CacheSize(reclaimable: worktree.reclaimable, size: worktree.size, checkout: worktree.checkout, hasCaches: hasCaches,
-                      font: Theme.monoCaption, color: Theme.text2)
+            Text(Format.diskBytes(worktree.footprint))
+                .font(Theme.monoCaption)
+                .foregroundStyle(Theme.text2)
+                .frame(width: 64, alignment: .trailing)
+                .help(L10n.format("Removing the worktree frees %@: its checkout and caches. Its branch stays.", Format.diskBytes(worktree.footprint)))
         }
         .padding(.leading, 38)
         .padding(.trailing, 30)
         .frame(height: 24)
         .contentShape(Rectangle())
-        .onTapGesture { toggle(worktree.artifacts) }
+        .onTapGesture { if canPick || isSelected { toggle() } }
         .contextMenu {
             Button(L10n.text("Reveal in Finder")) { NSWorkspace.shared.selectFile(nil, inFileViewerRootedAtPath: worktree.root) }
         }
         .environment(\.layoutDirection, .leftToRight)
+    }
+
+    @ViewBuilder private var indicator: some View {
+        if let reason {
+            Image(systemName: ports.isEmpty ? "lock.fill" : "bolt.fill")
+                .font(.system(size: 8))
+                .foregroundStyle(ports.isEmpty ? Theme.text3 : Theme.amber)
+                .help(reason)
+        } else if let status, status.hasWarnings {
+            Image(systemName: "exclamationmark.triangle.fill")
+                .font(.system(size: 9))
+                .foregroundStyle(Theme.amber)
+                .help(Self.warnings(status).joined(separator: "\n"))
+        } else if status == nil {
+            ProgressView().controlSize(.mini).scaleEffect(0.7).frame(width: 10, height: 10)
+                .help(L10n.text("Checking with git…"))
+        }
+    }
+
+    /// Why a worktree is kept, or nil when it can be removed.
+    static func blockerText(status: WorktreeStatus?, ports: [Int]) -> String? {
+        if !ports.isEmpty { return L10n.format("A dev server is running in it on %@, so it's kept.", ports.map { ":\($0)" }.joined(separator: " ")) }
+        switch status?.blocker {
+        case .changes(let count)?:
+            return L10n.format("%d uncommitted %@, so it's kept. Commit or stash them first.", count, L10n.counted("change", "changes", count: count))
+        case .orphaned?: return L10n.text("Its detached HEAD has commits on no branch, so it's kept.")
+        case .locked?: return L10n.text("Locked, or git can't read it, so it's kept.")
+        case nil: return nil
+        }
+    }
+
+    /// What removing it deletes or leaves behind, one sentence each.
+    static func warnings(_ status: WorktreeStatus) -> [String] {
+        var lines: [String] = []
+        if !status.untracked.isEmpty {
+            lines.append(L10n.format("Untracked files will be deleted: %@", list(status.untracked)))
+        }
+        if !status.secrets.isEmpty {
+            lines.append(L10n.format("Ignored files like .env will be deleted: %@", list(status.secrets)))
+        }
+        if let unpushed = status.unpushed, unpushed > 0 {
+            lines.append(L10n.format("%d %@ on no remote. The branch keeps them.", unpushed, L10n.counted("commit", "commits", count: unpushed)))
+        }
+        return lines
+    }
+
+    private static func list(_ paths: [String]) -> String {
+        paths.count > 3 ? paths.prefix(3).joined(separator: ", ") + ", " + L10n.format("%d more", paths.count - 3) : paths.joined(separator: ", ")
     }
 }
 
@@ -932,11 +1175,11 @@ struct CleanupCard: View {
 
     private func jobLabel(_ job: BuildCacheStore.CleanupJob) -> some View {
         HStack(spacing: 6) {
-            Text(job.project.relativePath(of: job.artifact))
+            Text(job.isWorktree ? job.project.name : job.project.relativePath(of: job.artifact))
                 .font(Theme.monoCaption).foregroundStyle(Theme.text1.opacity(0.85))
                 .lineLimit(1).truncationMode(.middle)
                 .layoutPriority(1)
-            Text(job.project.name)
+            Text(job.isWorktree ? L10n.format("%@ worktree", job.project.repository ?? "") : job.project.name)
                 .font(Theme.caption).foregroundStyle(Theme.text3)
                 .lineLimit(1).truncationMode(.tail)
         }

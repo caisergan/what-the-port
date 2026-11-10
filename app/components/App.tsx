@@ -21,12 +21,16 @@ import {
   formatDisk,
   formatDiskTotal,
   isPhrase,
+  isWorktreeId,
   kindColor,
   reclaimable,
   rowArtifacts,
   rowCheckouts,
   rowMembers,
   suggestedCaches,
+  worktreeFootprint,
+  worktreeId,
+  worktreeOf,
 } from './caches'
 import {
   type Agent,
@@ -48,9 +52,11 @@ import {
 // section; clicking around works like the real app until the next section.
 
 // A folder in the Build caches deletion queue (BuildCacheStore.CleanupJob).
-export type CacheJob = { id: string; state: 'queued' | 'deleting' | 'done' }
+// A worktree's job carries its size and the cache ids that go with it.
+export type CacheJob = { id: string; state: 'queued' | 'deleting' | 'done'; mb?: number; includes?: string[] }
 const CACHE_ARTIFACTS = CACHE_PROJECTS.flatMap((p) => p.artifacts)
-const cacheSize = (id: string) => CACHE_ARTIFACTS.find((a) => a.id === id)?.reclaimable ?? 0
+const cacheSize = (job: string | CacheJob) =>
+  typeof job !== 'string' && job.mb !== undefined ? job.mb : CACHE_ARTIFACTS.find((a) => a.id === (typeof job === 'string' ? job : job.id))?.reclaimable ?? 0
 
 type View = { name: 'list' } | { name: 'detail'; port: string } | { name: 'cleanUp' } | { name: 'caches' }
 
@@ -139,24 +145,36 @@ export function useDemo(section: number) {
 
   // Simulated: nothing on the visitor's Mac is touched. Like the app, the
   // folders leave the list at once and are deleted one at a time.
+  // Worktrees go whole, caches and all, after the folders.
   const deleteCaches = useCallback((ids: string[]) => {
-    setRemovedCaches((current) => [...current, ...ids])
-    setCacheSelection((current) => current.filter((id) => !ids.includes(id)))
+    const worktrees = ids.map(worktreeOf).filter((p): p is CacheProject => !!p)
+    const inside = worktrees.flatMap((p) => p.artifacts.map((a) => a.id)).filter((id) => !removedCaches.includes(id))
+    const folders = ids.filter((id) => !isWorktreeId(id) && !inside.includes(id))
+    const worktreeJobs = worktrees.map(
+      (p): CacheJob => ({
+        id: worktreeId(p),
+        state: 'queued',
+        mb: worktreeFootprint(p, removedCaches),
+        includes: p.artifacts.map((a) => a.id).filter((id) => inside.includes(id)),
+      }),
+    )
+    setRemovedCaches((current) => [...current, ...folders, ...inside, ...worktrees.map(worktreeId)])
+    setCacheSelection((current) => current.filter((id) => !ids.includes(id) && !inside.includes(id)))
     setCacheJobs((current) => {
       // A finished queue still on screen makes way for the new one.
       const kept = current.every((job) => job.state === 'done') ? [] : current
-      const jobs = [...kept, ...ids.map((id): CacheJob => ({ id, state: 'queued' }))]
+      const jobs = [...kept, ...folders.map((id): CacheJob => ({ id, state: 'queued' })), ...worktreeJobs]
       if (!jobs.some((job) => job.state === 'deleting')) {
         const next = jobs.findIndex((job) => job.state === 'queued')
         jobs[next] = { ...jobs[next], state: 'deleting' }
       }
       return jobs
     })
-  }, [])
+  }, [removedCaches])
 
-  // Folders that haven't started go back in the list.
+  // Folders and worktrees that haven't started go back in the list.
   const cancelQueuedCaches = useCallback(() => {
-    const queued = cacheJobs.filter((job) => job.state === 'queued').map((job) => job.id)
+    const queued = cacheJobs.filter((job) => job.state === 'queued').flatMap((job) => [job.id, ...(job.includes ?? [])])
     setCacheJobs((current) => current.filter((job) => job.state !== 'queued'))
     setRemovedCaches((current) => current.filter((id) => !queued.includes(id)))
   }, [cacheJobs])
@@ -172,7 +190,8 @@ export function useDemo(section: number) {
   const finished = cacheJobs.length > 0 && cacheJobs.every((job) => job.state === 'done')
   useEffect(() => {
     if (!deleting) return
-    const step = 100 / Math.max(500, (cacheSize(deleting) / 1024) * 1500)
+    const job = cacheJobs.find((j) => j.id === deleting)
+    const step = 100 / Math.max(500, (cacheSize(job ?? deleting) / 1024) * 1500)
     const timer = setInterval(() => setCacheFraction((fraction) => Math.min(fraction + step, 1)), 100)
     return () => clearInterval(timer)
   }, [deleting])
@@ -948,38 +967,87 @@ const checkState = (artifacts: Artifact[], selection: string[]) => {
   return count === 0 ? 'off' : count === artifacts.length ? 'on' : 'mixed'
 }
 
-// One worktree (or the main repository) in an expanded repository row:
-// WorktreeGroupRow.memberRow in BuildCachesView.swift.
-function WorktreeLine({ member, detail, open, demo, l }: { member: CacheProject; detail: string; open: boolean; demo: Demo; l: Localizer }) {
-  const hasCaches = member.artifacts.length > 0
-  const toggle = () => demo.toggleCaches(member.artifacts.map((a) => a.id))
+// One line in an expanded repository row (WorktreeGroupRow.memberRow). A
+// worktree's line picks the whole worktree, with what git warns about; the
+// main repository's line picks its caches.
+function WorktreeLine({
+  member,
+  open,
+  demo,
+  l,
+  label,
+  kinds,
+  blocker,
+  warnings,
+  toggleWorktree,
+}: {
+  member: CacheProject
+  open: boolean
+  demo: Demo
+  l: Localizer
+  label?: string
+  kinds: string
+  blocker: string | null
+  warnings: string[]
+  toggleWorktree: () => void
+}) {
+  const isWorktree = member.checkout !== undefined
+  const picked = demo.cacheSelection.includes(worktreeId(member))
+  const canPick = isWorktree ? !blocker || picked : member.artifacts.length > 0
+  const toggle = isWorktree ? toggleWorktree : () => demo.toggleCaches(member.artifacts.map((a) => a.id))
   return (
     <div
       role="button"
-      tabIndex={open && hasCaches ? 0 : -1}
+      tabIndex={open && canPick ? 0 : -1}
       className={styles.cacheGroup}
-      onClick={toggle}
+      aria-pressed={isWorktree ? picked : checkState(member.artifacts, demo.cacheSelection) === 'on'}
+      onClick={canPick ? toggle : undefined}
       onKeyDown={(e) => {
-        if (e.key === 'Enter' || e.key === ' ') {
+        if (canPick && (e.key === 'Enter' || e.key === ' ')) {
           e.preventDefault()
           toggle()
         }
       }}
     >
-      <span className={styles.cacheCheck} data-empty={!hasCaches}>
-        <Check state={hasCaches ? checkState(member.artifacts, demo.cacheSelection) : 'off'} small />
+      <span className={styles.cacheCheck} data-empty={!canPick}>
+        <Check state={isWorktree ? (picked ? 'on' : 'off') : checkState(member.artifacts, demo.cacheSelection)} small />
       </span>
-      <span className={`${styles.mono} ${styles.ellipsis}`}>{member.name}</span>
-      {member.port && (
-        <span className={styles.cacheServer} title={l.format('Server on %@', `:${member.port}`)}>
-          ⚡︎
+      <span className={`${label ? '' : styles.mono} ${styles.ellipsis}`}>{label ?? member.name}</span>
+      {isWorktree && blocker ? (
+        <span className={member.port ? styles.cacheServer : styles.t3} title={blocker} aria-label={blocker}>
+          {member.port ? '⚡︎' : <LockIcon />}
         </span>
-      )}
-      <span className={styles.t3}>{detail}</span>
-      <span className={`${styles.mono} ${styles.t2} ${styles.cacheGroupSize}`} data-empty={!hasCaches}>
-        {hasCaches ? formatDisk(reclaimable(member.artifacts)) : '–'}
+      ) : isWorktree && warnings.length ? (
+        <span className={styles.worktreeWarnIcon} title={warnings.join('\n')} aria-label={warnings.join(' ')}>
+          <WarningIcon />
+        </span>
+      ) : null}
+      <span className={styles.t3}>{isWorktree ? l.format('%@ checkout', formatDisk(member.checkout ?? 0)) : kinds}</span>
+      <span
+        className={`${styles.mono} ${styles.t2} ${styles.cacheGroupSize}`}
+        title={isWorktree ? l.format('Removing the worktree frees %@: its checkout and caches. Its branch stays.', formatDisk(worktreeFootprint(member))) : undefined}
+      >
+        {formatDisk(isWorktree ? worktreeFootprint(member) : reclaimable(member.artifacts))}
       </span>
     </div>
+  )
+}
+
+function WarningIcon() {
+  return (
+    <svg width="10" height="10" viewBox="0 0 10 10" aria-hidden className={styles.warningIcon}>
+      <path d="M5 1 9.4 8.8H.6Z" fill={AMBER} />
+      <path d="M5 4v2.2M5 7.4v.1" stroke="#0B0D12" strokeWidth="1.1" strokeLinecap="round" />
+    </svg>
+  )
+}
+
+function LockIcon() {
+  return (
+    <svg width="8" height="9" viewBox="0 0 8 9" aria-hidden>
+      <rect x="0.5" y="4" width="7" height="4.6" rx="1" fill="currentColor" />
+      <path d="M2 4V2.8a2 2 0 0 1 4 0V4" fill="none" stroke="currentColor" strokeWidth="1.1" />
+    </svg>
   )
 }
 
@@ -999,15 +1067,17 @@ function CachesView({ demo, l }: { demo: Demo; l: Localizer }) {
     ...p,
     artifacts: p.artifacts.filter((a) => !demo.removedCaches.includes(a.id)).sort((a, b) => b.reclaimable - a.reclaimable),
   }))
-    .filter((p) => p.artifacts.length || p.checkout)
+    .filter((p) => (p.artifacts.length || p.checkout) && !demo.removedCaches.includes(worktreeId(p)))
   const rows = cacheRows(projects)
   const artifacts = projects.flatMap((p) => p.artifacts)
   const total = reclaimable(artifacts)
   const checkoutTotal = checkouts(projects)
   const worktreeCount = projects.filter((p) => p.checkout !== undefined).length
-  const removedMb = reclaimable(CACHE_PROJECTS.flatMap((p) => p.artifacts).filter((a) => demo.removedCaches.includes(a.id)))
+  const removedMb =
+    reclaimable(CACHE_PROJECTS.flatMap((p) => p.artifacts).filter((a) => demo.removedCaches.includes(a.id))) +
+    checkouts(CACHE_PROJECTS.filter((p) => demo.removedCaches.includes(worktreeId(p))))
   const jobs = demo.cacheJobs
-  const jobMb = (state: CacheJob['state']) => reclaimable(CACHE_ARTIFACTS.filter((a) => jobs.some((j) => j.id === a.id && j.state === state)))
+  const jobMb = (state: CacheJob['state']) => jobs.filter((j) => j.state === state).reduce((sum, j) => sum + cacheSize(j), 0)
   const deletingMb = jobMb('deleting')
   const running = jobs.some((j) => j.state !== 'done')
   const freedMb = jobMb('done') + deletingMb * demo.cacheFraction
@@ -1018,9 +1088,38 @@ function CachesView({ demo, l }: { demo: Demo; l: Localizer }) {
   const kinds = KINDS.map((kind) => ({ kind, mb: reclaimable(artifacts.filter((a) => a.kind === kind)) }))
     .filter((k) => k.mb > 0)
     .sort((a, b) => b.mb - a.mb)
-  const selected = artifacts.filter((a) => demo.cacheSelection.includes(a.id))
-  const selectedMb = reclaimable(selected)
+  // Worktrees picked to be removed whole; folders inside them go with them.
+  const selectedWorktrees = projects.filter((p) => demo.cacheSelection.includes(worktreeId(p)))
+  const selected = projects
+    .filter((p) => !selectedWorktrees.includes(p))
+    .flatMap((p) => p.artifacts)
+    .filter((a) => demo.cacheSelection.includes(a.id))
+  const selectedMb = reclaimable(selected) + selectedWorktrees.reduce((sum, p) => sum + worktreeFootprint(p), 0)
   const selectedFolders = selected.reduce((sum, a) => sum + (a.count ?? 1), 0)
+  const hasSelection = selected.length > 0 || selectedWorktrees.length > 0
+  const worktreeWord = (count: number) => l.counted('worktree', 'worktrees', count)
+  const deleteLabel = !selectedWorktrees.length
+    ? l.format('Delete %d %@', selectedFolders, l.counted('folder', 'folders', selectedFolders))
+    : !selected.length
+      ? l.format('Remove %d %@', selectedWorktrees.length, worktreeWord(selectedWorktrees.length))
+      : l.format('Remove %d %@ and delete %d %@', selectedWorktrees.length, worktreeWord(selectedWorktrees.length), selectedFolders, l.counted('folder', 'folders', selectedFolders))
+  // Why a worktree is kept (WorktreeLine.blockerText), or null when it can go.
+  const blocker = (p: CacheProject) =>
+    p.port
+      ? l.format("A dev server is running in it on %@, so it's kept.", `:${p.port}`)
+      : p.status?.changes
+        ? l.format("%d uncommitted %@, so it's kept. Commit or stash them first.", p.status.changes, l.counted('change', 'changes', p.status.changes))
+        : null
+  const warningsOf = (p: CacheProject) =>
+    [
+      p.status?.untracked?.length ? l.format('Untracked files will be deleted: %@', p.status.untracked.join(', ')) : '',
+      p.status?.secrets?.length ? l.format('Ignored files like .env will be deleted: %@', p.status.secrets.join(', ')) : '',
+      p.status?.unpushed ? l.format('%d %@ on no remote. The branch keeps them.', p.status.unpushed, l.counted('commit', 'commits', p.status.unpushed)) : '',
+    ].filter(Boolean)
+  const toggleWorktree = (p: CacheProject) => {
+    if (blocker(p) && !demo.cacheSelection.includes(worktreeId(p))) return
+    demo.toggleCaches([worktreeId(p)])
+  }
   const suggestion = suggestedCaches(demo.removedCaches)
   // The disk bar segments a row contributes to (CacheRowItem.segments).
   const segments = (row: CacheRow) =>
@@ -1055,7 +1154,7 @@ function CachesView({ demo, l }: { demo: Demo; l: Localizer }) {
     timer.current = setTimeout(() => setScanning(false), 1200)
   }
   const confirmDelete = () => {
-    demo.deleteCaches(selected.map((a) => a.id))
+    demo.deleteCaches([...selected.map((a) => a.id), ...selectedWorktrees.map(worktreeId)])
     setConfirming(false)
   }
 
@@ -1197,6 +1296,10 @@ function CachesView({ demo, l }: { demo: Demo; l: Localizer }) {
               ? `${l.format('%@ checkout', formatDisk(project.checkout))} · ${l.format('%@ worktree', project.repository)}`
               : `${project.repository ? `${l.format('%@ worktree', project.repository)} · ` : ''}${kindsOf(items)}`
           const age = ageText(Math.min(...members.map((m) => m.lastUsed)))
+          // Worktrees untouched for a while that can go, not yet picked.
+          const untouched = (group?.worktrees ?? []).filter(
+            (w) => w.lastUsed >= STALE_DAYS * 1440 && !blocker(w) && !demo.cacheSelection.includes(worktreeId(w)),
+          )
           const name = group ? group.name : project.name
           return (
             <div
@@ -1243,7 +1346,7 @@ function CachesView({ demo, l }: { demo: Demo; l: Localizer }) {
                 <span className={styles.rowMemory} data-empty={!hasCaches} title={hasCaches ? undefined : l.text('No build caches')}>
                   {hasCaches ? formatDisk(reclaimable(items)) : '–'}
                 </span>
-                {hasCaches || group ? (
+                {hasCaches || group || project.checkout !== undefined ? (
                   <button
                     type="button"
                     className={styles.cacheChevron}
@@ -1264,18 +1367,33 @@ function CachesView({ demo, l }: { demo: Demo; l: Localizer }) {
               </div>
               <div className={styles.collapsible} data-open={open}>
                 <div>
-                  {group
-                    ? members.map((member) => (
-                        <WorktreeLine
-                          key={member.name}
-                          member={member}
-                          detail={member.checkout !== undefined ? l.format('%@ checkout', formatDisk(member.checkout)) : kindsOf(member.artifacts)}
-                          open={open}
-                          demo={demo}
-                          l={l}
-                        />
-                      ))
-                    : [...project.artifacts]
+                  {group && untouched.length > 0 && (
+                    <div className={styles.worktreePick}>
+                      <button
+                        type="button"
+                        tabIndex={open ? 0 : -1}
+                        title={l.text('Worktrees git can remove without losing uncommitted changes. Check the warnings before removing them.')}
+                        onClick={() => demo.setCacheSelection([...demo.cacheSelection, ...untouched.map(worktreeId)])}
+                      >
+                        {l.format('Select %d %@ untouched for %d days', untouched.length, worktreeWord(untouched.length), STALE_DAYS)}
+                      </button>
+                    </div>
+                  )}
+                  {(group ? members : project.checkout !== undefined ? [project] : []).map((member) => (
+                    <WorktreeLine
+                      key={member.name}
+                      member={member}
+                      label={group ? undefined : l.text('Whole worktree')}
+                      kinds={kindsOf(member.artifacts)}
+                      blocker={blocker(member)}
+                      warnings={warningsOf(member)}
+                      toggleWorktree={() => toggleWorktree(member)}
+                      open={open}
+                      demo={demo}
+                      l={l}
+                    />
+                  ))}
+                  {!group && [...project.artifacts]
                         .sort((a, b) => b.reclaimable - a.reclaimable)
                         .map((a) => (
                           <div
@@ -1316,21 +1434,47 @@ function CachesView({ demo, l }: { demo: Demo; l: Localizer }) {
         </div>
       ) : confirming ? (
         <div className={`${styles.popSection} ${styles.cleanFooter}`}>
-          <span className={`${styles.caption} ${styles.t2}`}>
-            {l.text('Deleted folders are gone for good. Your tools recreate them on the next install or build.')}
-          </span>
+          {selected.length > 0 && (
+            <span className={`${styles.caption} ${styles.t2}`}>
+              {l.text('Deleted folders are gone for good. Your tools recreate them on the next install or build.')}
+            </span>
+          )}
+          {selectedWorktrees.length > 0 && (
+            <div className={`${styles.caption} ${styles.worktreeWarnings}`}>
+              <span className={styles.t2}>
+                {l.format(
+                  'Removes %d %@ with git worktree remove: their files are gone for good, their branches stay.',
+                  selectedWorktrees.length,
+                  worktreeWord(selectedWorktrees.length),
+                )}
+              </span>
+              {[
+                [selectedWorktrees.filter((p) => p.status?.untracked?.length).length, 'Untracked files in %d %@ will be deleted.'],
+                [selectedWorktrees.filter((p) => p.status?.secrets?.length).length, '.env or key files in %d %@ will be deleted.'],
+                [selectedWorktrees.filter((p) => p.status?.unpushed).length, 'Commits on no remote in %d %@ stay on their branches.'],
+              ]
+                .filter(([count]) => (count as number) > 0)
+                .map(([count, phrase]) => (
+                  <span key={phrase as string} className={styles.worktreeWarning}>
+                    <WarningIcon />
+                    {l.format(phrase as string, count as number, worktreeWord(count as number))}
+                  </span>
+                ))}
+              <span className={styles.t3}>{l.text('Anything with uncommitted changes is kept.')}</span>
+            </div>
+          )}
           <div className={styles.cacheActions}>
             <button type="button" className={styles.secondaryAction} onClick={() => setConfirming(false)}>
               {l.text('Cancel')}
             </button>
             <button type="button" className={`${styles.primaryAction} ${styles.destructive}`} onClick={confirmDelete}>
-              {l.format('Delete %d %@', selectedFolders, l.counted('folder', 'folders', selectedFolders))}
+              {deleteLabel}
             </button>
           </div>
         </div>
       ) : (
         <div className={`${styles.popSection} ${styles.actions}`}>
-          {selected.length ? (
+          {hasSelection ? (
             <button type="button" className={styles.secondaryAction} onClick={() => demo.setCacheSelection([])}>
               {l.text('Clear')}
             </button>
@@ -1347,7 +1491,8 @@ function CachesView({ demo, l }: { demo: Demo; l: Localizer }) {
           <button
             type="button"
             className={`${styles.primaryAction} ${styles.destructive}`}
-            disabled={!selected.length}
+            disabled={!hasSelection}
+            title={deleteLabel}
             onClick={() => setConfirming(true)}
           >
             <svg width="13" height="13" viewBox="0 0 14 14" aria-hidden style={{ marginInlineEnd: 7 }}>
@@ -1360,7 +1505,7 @@ function CachesView({ demo, l }: { demo: Demo; l: Localizer }) {
                 strokeLinejoin="round"
               />
             </svg>
-            {selected.length ? l.format('Free %@', formatDisk(selectedMb)) : l.text('Delete caches')}
+            {hasSelection ? l.format('Free %@', formatDisk(selectedMb)) : l.text('Delete caches')}
           </button>
           <button type="button" className={styles.moreAction} aria-label="More">
             <span />
@@ -1385,6 +1530,15 @@ function CleanupCard({ demo, l, freedMb }: { demo: Demo; l: Localizer; freedMb: 
     ? l.format('%d %@', jobs.length, l.counted('folder', 'folders', jobs.length))
     : l.format('%d of %d', Math.min(done + 1, jobs.length), jobs.length)
   const label = (id: string) => {
+    const worktree = worktreeOf(id)
+    if (worktree) {
+      return (
+        <span className={styles.cleanupLabel}>
+          <span className={`${styles.mono} ${styles.ellipsis}`}>{worktree.name}</span>
+          <span className={`${styles.t3} ${styles.ellipsis}`}>{l.format('%@ worktree', worktree.repository ?? '')}</span>
+        </span>
+      )
+    }
     const project = CACHE_PROJECTS.find((p) => p.artifacts.some((a) => a.id === id))!
     const a = project.artifacts.find((a) => a.id === id)!
     return (
@@ -1426,7 +1580,7 @@ function CleanupCard({ demo, l, freedMb }: { demo: Demo; l: Localizer; freedMb: 
               <div key={job.id} className={styles.cleanupJob} data-state={job.state}>
                 {job.state === 'deleting' ? <Spinner /> : <JobIcon state={job.state} />}
                 {label(job.id)}
-                <span className={`${styles.mono} ${styles.t2}`}>{formatDisk(cacheSize(job.id))}</span>
+                <span className={`${styles.mono} ${styles.t2}`}>{formatDisk(cacheSize(job))}</span>
               </div>
             ))}
           </div>

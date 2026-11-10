@@ -1945,6 +1945,22 @@
 .cacheProject .serverRow > .cacheCheck { margin-inline-end: 12px; }
 .cacheCheck[data-empty='true'] { opacity: 0.3; }
 .rowMemory[data-empty='true'], .cacheGroupSize[data-empty='true'] { color: #ebebf566; }
+/* Removing worktrees (WorktreeLine, worktreeWarnings in BuildCachesView.swift) */
+.warningIcon { display: block; flex-shrink: 0; }
+.worktreeWarnIcon { display: flex; flex-shrink: 0; margin-inline-start: -5px; }
+.cacheGroup .cacheServer, .cacheGroup .t3:has(> svg) { display: flex; flex-shrink: 0; margin-inline-start: -5px; }
+.worktreePick { padding: 0 30px 4px 38px; }
+.worktreePick button {
+  height: 20px;
+  padding: 0 8px;
+  border-radius: 6px;
+  background: #ffffff14;
+  color: #f5f5f7;
+  font-size: 11px;
+}
+.worktreePick button:hover { background: #ffffff1f; }
+.worktreeWarnings { display: flex; flex-direction: column; gap: 4px; }
+.worktreeWarning { display: flex; align-items: center; gap: 5px; color: #f5f5f7d9; }
 .checkbox[data-small='true'] { width: 12px; height: 12px; border-radius: 4px; }
 .checkbox[data-small='true'] svg { width: 8px; height: 8px; }
 .cacheActions { display: flex; gap: 8px; }

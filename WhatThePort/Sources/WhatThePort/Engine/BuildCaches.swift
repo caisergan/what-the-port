@@ -52,6 +52,38 @@ struct WorktreeCheckout: Codable, Equatable {
     var stamp: Date?
 }
 
+/// What removing a linked worktree would lose, from git. Checked before a
+/// worktree can be picked and again right before it's removed.
+struct WorktreeStatus: Equatable {
+    enum Blocker: Equatable {
+        /// Tracked files with changes, staged or not.
+        case changes(Int)
+        /// A detached HEAD with commits on no branch, remote or tag.
+        case orphaned
+        case locked
+    }
+
+    var changes = 0
+    /// Untracked files and folders outside the caches, as git lists them. Removing deletes them.
+    var untracked: [String] = []
+    /// Ignored files that look like secrets or local settings, such as `.env`. Removing deletes them.
+    var secrets: [String] = []
+    /// Commits on HEAD that are on no remote. The branch keeps them. Nil without remotes.
+    var unpushed: Int?
+    var orphaned = false
+    var locked = false
+
+    /// Why the worktree is kept, if it is.
+    var blocker: Blocker? {
+        if changes > 0 { return .changes(changes) }
+        if orphaned { return .orphaned }
+        if locked { return .locked }
+        return nil
+    }
+
+    var hasWarnings: Bool { !untracked.isEmpty || !secrets.isEmpty || (unpushed ?? 0) > 0 }
+}
+
 /// A repository, worktree or top-level folder and the artifacts inside it.
 struct CacheProject: Codable, Identifiable, Equatable {
     let root: String
@@ -304,6 +336,96 @@ enum BuildCacheScanner {
         let data = stdout.fileHandleForReading.readDataToEndOfFile()
         process.waitUntilExit()
         return String(decoding: data, as: UTF8.self).split(separator: "\n").map { String($0).trimmingCharacters(in: CharacterSet(charactersIn: "/")) }
+    }
+
+    /// Runs git and returns its exit status and lines, untrimmed. Hooks and
+    /// optional locks are off, so it never touches anything but what it's asked.
+    @discardableResult
+    static func git(_ arguments: [String], in directory: String) -> (status: Int32, lines: [String]) {
+        guard let gitPath else { return (-1, []) }
+        let process = Process()
+        let stdout = Pipe()
+        process.executableURL = URL(fileURLWithPath: gitPath)
+        process.arguments = ["-C", directory, "-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null"] + arguments
+        process.standardInput = FileHandle.nullDevice
+        process.standardOutput = stdout
+        process.standardError = FileHandle.nullDevice
+        process.environment = ProcessInfo.processInfo.environment.merging(["GIT_OPTIONAL_LOCKS": "0"]) { $1 }
+        do { try process.run() } catch { return (-1, []) }
+        let data = stdout.fileHandleForReading.readDataToEndOfFile()
+        process.waitUntilExit()
+        let lines = String(decoding: data, as: UTF8.self).split(separator: "\n", omittingEmptySubsequences: true).map(String.init)
+        return (process.terminationStatus, lines)
+    }
+
+    // MARK: - Worktrees
+
+    /// What removing the worktree at `root` would lose. `artifacts` are its
+    /// caches, which never count as untracked work. Nil if it isn't a linked
+    /// worktree or git can't read it.
+    static func worktreeStatus(_ root: String, artifacts: [String]) -> WorktreeStatus? {
+        guard gitPath != nil, let gitDir = gitDirectory(root), mainRepository(gitDirectory: gitDir) != nil else { return nil }
+        let status = git(["status", "--porcelain"], in: root)
+        guard status.status == 0 else { return nil }
+        let caches = artifacts.compactMap { $0.hasPrefix(root + "/") ? String($0.dropFirst(root.count + 1)) : nil }
+        let isCache = { (path: String) in caches.contains { path == $0 || path.hasPrefix($0 + "/") } }
+        var result = WorktreeStatus()
+        for line in status.lines where line.count > 3 {
+            let code = line.prefix(2), path = String(line.dropFirst(3)).trimmingCharacters(in: CharacterSet(charactersIn: "/\""))
+            if code == "??" {
+                if !isCache(path) { result.untracked.append(path) }
+            } else if code != "!!" {
+                result.changes += 1
+            }
+        }
+        result.secrets = git(["ls-files", "--others", "--ignored", "--exclude-standard", "--directory"], in: root).lines
+            .filter { !$0.hasSuffix("/") && !isCache($0) && looksSecret(($0 as NSString).lastPathComponent) }
+        if !git(["remote"], in: root).lines.isEmpty {
+            result.unpushed = git(["rev-list", "--count", "HEAD", "--not", "--remotes"], in: root).lines.first.flatMap { Int($0) }
+        }
+        if git(["symbolic-ref", "-q", "HEAD"], in: root).status != 0 {
+            let lost = git(["rev-list", "--count", "HEAD", "--not", "--branches", "--remotes", "--tags"], in: root).lines.first.flatMap { Int($0) }
+            result.orphaned = (lost ?? 1) > 0
+        }
+        result.locked = access(gitDir + "/locked", F_OK) == 0
+        return result
+    }
+
+    /// `.env`, keys and local settings: ignored, so git won't keep them, and not recreated by any tool.
+    static func looksSecret(_ name: String) -> Bool {
+        let lower = name.lowercased()
+        if lower.hasPrefix(".env") {
+            return ![".example", ".sample", ".template", ".dist", ".defaults"].contains { lower.hasSuffix($0) }
+        }
+        let extensions = ["pem", "key", "p12", "p8", "pfx", "jks", "keystore", "mobileprovision", "cer"]
+        if extensions.contains((lower as NSString).pathExtension) { return true }
+        return [".npmrc", ".netrc", ".pypirc", "credentials.json", "service-account.json"].contains(lower) || lower.contains("secret")
+    }
+
+    /// Removes a linked worktree for good: checks it again, deletes its caches
+    /// (the bulk of it, with progress), then has git remove the rest and its
+    /// administrative files. The branch stays in the repository. Anything
+    /// with tracked changes, a detached HEAD's own commits or a lock is kept.
+    static func removeWorktree(_ project: CacheProject, roots: [String], progress: (Double) -> Void = { _ in }) -> Bool {
+        let root = (project.root as NSString).standardizingPath
+        var info = stat()
+        guard root == project.root, lstat(root, &info) == 0, (info.st_mode & S_IFMT) == S_IFDIR,
+              roots.contains(where: { root.hasPrefix(($0 as NSString).standardizingPath + "/") }),
+              let gitDir = gitDirectory(root), let repository = mainRepository(gitDirectory: gitDir),
+              let status = worktreeStatus(root, artifacts: project.artifacts.map(\.path)), status.blocker == nil else { return false }
+        let caches = project.artifacts.filter { isStillArtifact($0, roots: roots) }
+        let cacheBytes = Double(caches.reduce(0) { $0 + $1.reclaimable })
+        let total = max(cacheBytes + Double(project.checkoutBytes), 1)
+        var done = 0.0
+        for artifact in caches {
+            let share = Double(artifact.reclaimable) / total
+            _ = remove(artifact, roots: roots) { progress(done + $0 * share) }
+            done += share
+        }
+        // Untracked files and nested caches git doesn't know about need --force; tracked changes were ruled out above.
+        git(["worktree", "remove", "--force", root], in: repository)
+        progress(1)
+        return access(root, F_OK) != 0
     }
 
     // MARK: - Projects
