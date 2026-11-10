@@ -353,3 +353,15 @@
 "folders (few)" = "Ordner";
 "untouched %@" = "unberührt seit %@";
 "used %@ ago" = "vor %@ genutzt";
+"worktree" = "Worktree";
+"worktrees" = "Worktrees";
+"worktrees (few)" = "Worktrees";
+"Worktrees" = "Worktrees";
+"Worktree checkouts" = "Worktree-Checkouts";
+"Worktree checkouts · %@. Removing a worktree frees it; deleting caches doesn't." = "Worktree-Checkouts · %@. Ein Worktree zu entfernen gibt sie frei, Caches zu löschen nicht.";
+"%@ checkout" = "%@ Checkout";
+"Show worktrees" = "Worktrees anzeigen";
+"No build caches" = "Keine Build-Caches";
+"Its checkout takes another %@: the worktree's own files. Deleting caches leaves them; removing the worktree frees them." = "Der Checkout belegt weitere %@: die eigenen Dateien des Worktrees. Caches zu löschen lässt sie stehen; den Worktree zu entfernen gibt sie frei.";
+"Checkouts take %@: the worktrees' own files. Deleting caches leaves them; removing worktrees you no longer need frees them." = "Checkouts belegen %@: die eigenen Dateien der Worktrees. Caches zu löschen lässt sie stehen; Worktrees zu entfernen, die du nicht mehr brauchst, gibt sie frei.";
+"%@ in %d %@" = "%@ in %d %@";

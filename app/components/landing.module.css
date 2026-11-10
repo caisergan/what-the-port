@@ -1940,6 +1940,11 @@
 .cacheGroup .t3 { flex-shrink: 0; margin-inline-start: auto; }
 .cacheGroupSize { width: 64px; flex-shrink: 0; margin-inline-start: auto; text-align: end; }
 .cacheGroup .t3 + .cacheGroupSize { margin-inline-start: 0; }
+/* Worktrees without caches: nothing to tick, a dash for size. */
+.cacheCheck { display: flex; flex-shrink: 0; }
+.cacheProject .serverRow > .cacheCheck { margin-inline-end: 12px; }
+.cacheCheck[data-empty='true'] { opacity: 0.3; }
+.rowMemory[data-empty='true'], .cacheGroupSize[data-empty='true'] { color: #ebebf566; }
 .checkbox[data-small='true'] { width: 12px; height: 12px; border-radius: 4px; }
 .checkbox[data-small='true'] svg { width: 8px; height: 8px; }
 .cacheActions { display: flex; gap: 8px; }

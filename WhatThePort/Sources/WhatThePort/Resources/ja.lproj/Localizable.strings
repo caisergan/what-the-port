@@ -353,3 +353,15 @@
 "folders (few)" = "フォルダ";
 "untouched %@" = "%@ 未使用";
 "used %@ ago" = "%@前に使用";
+"worktree" = "件のワークツリー";
+"worktrees" = "件のワークツリー";
+"worktrees (few)" = "件のワークツリー";
+"Worktrees" = "ワークツリー";
+"Worktree checkouts" = "ワークツリーのチェックアウト";
+"Worktree checkouts · %@. Removing a worktree frees it; deleting caches doesn't." = "ワークツリーのチェックアウト · %@。ワークツリーを削除すると解放されます。キャッシュを削除しても解放されません。";
+"%@ checkout" = "チェックアウト %@";
+"Show worktrees" = "ワークツリーを表示";
+"No build caches" = "ビルドキャッシュなし";
+"Its checkout takes another %@: the worktree's own files. Deleting caches leaves them; removing the worktree frees them." = "このチェックアウトはさらに %@ を使っています。ワークツリー自体のファイルです。キャッシュを削除しても残り、ワークツリーを削除すると解放されます。";
+"Checkouts take %@: the worktrees' own files. Deleting caches leaves them; removing worktrees you no longer need frees them." = "チェックアウトが %@ を使っています。各ワークツリー自体のファイルです。キャッシュを削除しても残り、不要になったワークツリーを削除すると解放されます。";
+"%@ in %d %@" = "%2$d %3$@で %1$@";

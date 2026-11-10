@@ -353,3 +353,15 @@
 "folders (few)" = "文件夹";
 "untouched %@" = "%@未动";
 "used %@ ago" = "%@前使用";
+"worktree" = "个 worktree";
+"worktrees" = "个 worktree";
+"worktrees (few)" = "个 worktree";
+"Worktrees" = "Worktree";
+"Worktree checkouts" = "Worktree 检出";
+"Worktree checkouts · %@. Removing a worktree frees it; deleting caches doesn't." = "Worktree 检出 · %@。移除 worktree 才能释放它，删除缓存不会。";
+"%@ checkout" = "检出 %@";
+"Show worktrees" = "显示 worktree";
+"No build caches" = "没有构建缓存";
+"Its checkout takes another %@: the worktree's own files. Deleting caches leaves them; removing the worktree frees them." = "它的检出还占用 %@：这是 worktree 自己的文件。删除缓存不会动它们；移除这个 worktree 才会释放。";
+"Checkouts take %@: the worktrees' own files. Deleting caches leaves them; removing worktrees you no longer need frees them." = "检出占用 %@：这是各个 worktree 自己的文件。删除缓存不会动它们；移除不再需要的 worktree 才会释放。";
+"%@ in %d %@" = "%2$d %3$@占 %1$@";

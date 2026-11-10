@@ -353,3 +353,15 @@
 "folders (few)" = "папки";
 "untouched %@" = "не чіпали %@";
 "used %@ ago" = "використано %@ тому";
+"worktree" = "worktree";
+"worktrees" = "worktree";
+"worktrees (few)" = "worktree";
+"Worktrees" = "Worktree";
+"Worktree checkouts" = "Файли worktree";
+"Worktree checkouts · %@. Removing a worktree frees it; deleting caches doesn't." = "Файли worktree · %@. Видалення worktree звільняє їх, видалення кешів — ні.";
+"%@ checkout" = "%@ файлів worktree";
+"Show worktrees" = "Показати worktree";
+"No build caches" = "Немає кешів збірки";
+"Its checkout takes another %@: the worktree's own files. Deleting caches leaves them; removing the worktree frees them." = "Його файли займають ще %@: власні файли worktree. Видалення кешів їх не чіпає; видалення worktree звільняє їх.";
+"Checkouts take %@: the worktrees' own files. Deleting caches leaves them; removing worktrees you no longer need frees them." = "Файли займають %@: власні файли worktree. Видалення кешів їх не чіпає; видалення непотрібних worktree звільняє їх.";
+"%@ in %d %@" = "%@ у %d %@";

@@ -11,6 +11,8 @@ enum Theme {
     static let hover = fill
     static let subtleFill = adaptive(light: 0x000000, dark: 0xFFFFFF, lightAlpha: 0.04, darkAlpha: 0.04)
     static let memoryTrack = adaptive(light: 0x000000, dark: 0xFFFFFF, lightAlpha: 0.06, darkAlpha: 0.05)
+    /// Worktree checkouts on the Build caches disk bar: neutral, since they are not caches.
+    static let worktreeCheckout = adaptive(light: 0x1D1D22, dark: 0xEBEBF5, lightAlpha: 0.36, darkAlpha: 0.42)
     /// Text on solid primary buttons and selected checkboxes.
     static let onPrimary = adaptive(light: 0xFAFAFC, dark: 0x0B0D12)
     static let windowBackground = adaptive(light: 0xF5F5F7, dark: 0x1E1E21)

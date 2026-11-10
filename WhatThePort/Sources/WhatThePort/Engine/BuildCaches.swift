@@ -42,20 +42,47 @@ struct BuildArtifact: Codable, Identifiable, Equatable {
     var name: String { (path as NSString).lastPathComponent }
 }
 
+/// A linked worktree's own files: the checkout and anything else in it that
+/// isn't a build cache. Deleting caches never touches it; removing the
+/// worktree with git frees it.
+struct WorktreeCheckout: Codable, Equatable {
+    /// What removing the worktree would free on top of its caches.
+    var reclaimable: UInt64
+    /// When the worktree last changed, as far as a rescan can tell cheaply.
+    var stamp: Date?
+}
+
 /// A repository, worktree or top-level folder and the artifacts inside it.
 struct CacheProject: Codable, Identifiable, Equatable {
     let root: String
     var name: String
     /// The main repository's folder name, for linked worktrees.
     var repository: String?
+    /// The main repository's path, for linked worktrees.
+    var repositoryRoot: String?
     var branch: String?
     var lastUsed: Date
     var artifacts: [BuildArtifact]
+    /// Measured for linked worktrees only.
+    var checkout: WorktreeCheckout?
 
     var id: String { root }
     var isWorktree: Bool { repository != nil }
     var size: UInt64 { artifacts.reduce(0) { $0 + $1.size } }
     var reclaimable: UInt64 { artifacts.reduce(0) { $0 + $1.reclaimable } }
+    var checkoutBytes: UInt64 { checkout?.reclaimable ?? 0 }
+    /// Still worth listing: it has caches, or it's a worktree taking up space.
+    var isListed: Bool { !artifacts.isEmpty || checkoutBytes > 0 }
+
+    /// What deleting its caches and removing the worktree would free together.
+    var footprint: UInt64 { reclaimable + checkoutBytes }
+
+    /// Whatever takes the most space first, then the most freeable caches.
+    static func largerFirst(_ a: CacheProject, _ b: CacheProject) -> Bool {
+        if a.footprint != b.footprint { return a.footprint > b.footprint }
+        if a.reclaimable != b.reclaimable { return a.reclaimable > b.reclaimable }
+        return a.root < b.root
+    }
 
     /// Path below the project root, e.g. `apps/web/.next`.
     func relativePath(of artifact: BuildArtifact) -> String {
@@ -78,36 +105,56 @@ enum BuildCacheScanner {
 
     // MARK: - Scan
 
-    /// Walks `roots`, then measures every artifact in parallel. Artifacts in
-    /// `reuse` whose folder hasn't changed keep their size instead of being
-    /// measured again. `progress` is called from worker threads.
-    static func scan(roots: [String], reuse: [String: BuildArtifact] = [:],
-                     progress: (_ artifact: BuildArtifact, _ project: String, _ total: Int) -> Void = { _, _, _ in }) -> [CacheProject] {
-        let candidates = gitFilter(discover(roots: roots))
-        let artifacts = measure(candidates, reuse: reuse) { artifact, project in progress(artifact, project, candidates.count) }
-        return group(artifacts)
+    /// Walks `roots`, then measures every artifact in parallel, then the
+    /// checkout of every linked worktree found. Artifacts in `reuse` whose
+    /// folder hasn't changed keep their size instead of being measured again,
+    /// and so do checkouts in `reuseCheckouts`. `progress` is called from
+    /// worker threads, with the artifact measured or nil for a checkout.
+    static func scan(roots: [String], reuse: [String: BuildArtifact] = [:], reuseCheckouts: [String: WorktreeCheckout] = [:],
+                     progress: (_ artifact: (artifact: BuildArtifact, project: String)?, _ total: Int) -> Void = { _, _ in }) -> [CacheProject] {
+        let found = discoverAll(roots: roots)
+        let candidates = gitFilter(found.candidates)
+        let worktrees = found.repositories.filter(isLinkedWorktree)
+        let total = candidates.count + worktrees.count
+        let artifacts = measure(candidates, reuse: reuse) { artifact, project in progress((artifact, project), total) }
+        let checkouts = measureCheckouts(worktrees, excluding: artifacts.map(\.artifact.path) + found.repositories,
+                                         reuse: reuseCheckouts) { progress(nil, total) }
+        return group(artifacts, checkouts: checkouts)
     }
 
-    static func group(_ artifacts: [(artifact: BuildArtifact, project: String)]) -> [CacheProject] {
-        Dictionary(grouping: artifacts, by: \.project).map { root, entries in
-            project(root: root, artifacts: entries.map(\.artifact).sorted { $0.reclaimable > $1.reclaimable })
+    static func group(_ artifacts: [(artifact: BuildArtifact, project: String)],
+                      checkouts: [String: WorktreeCheckout] = [:]) -> [CacheProject] {
+        var byProject = Dictionary(grouping: artifacts, by: \.project).mapValues { $0.map(\.artifact) }
+        for root in checkouts.keys where byProject[root] == nil { byProject[root] = [] }
+        return byProject.map { root, entries in
+            var project = project(root: root, artifacts: entries.sorted { $0.reclaimable > $1.reclaimable })
+            project.checkout = checkouts[root]
+            return project
         }
-        .sorted { $0.reclaimable == $1.reclaimable ? $0.root < $1.root : $0.reclaimable > $1.reclaimable }
+        .filter(\.isListed)
+        .sorted(by: CacheProject.largerFirst)
     }
 
     // MARK: - Discovery
 
     static func discover(roots: [String]) -> [Candidate] {
+        discoverAll(roots: roots).candidates
+    }
+
+    /// Artifacts, plus every repository and worktree passed on the way.
+    static func discoverAll(roots: [String]) -> (candidates: [Candidate], repositories: [String]) {
         var seen = Set<String>()
         let roots = roots.map { ($0 as NSString).standardizingPath }.filter { seen.insert($0).inserted }
         // Split each root by its top-level folders so big projects walk in parallel.
         var starts: [(path: String, depth: Int, project: String)] = []
         var found: [Candidate] = []
+        var repositories: [String] = []
         let lister = DirectoryLister()
         for root in roots where !roots.contains(where: { $0 != root && root.hasPrefix($0 + "/") }) {
             guard let entries = lister.list(root) else { continue }
             let names = Set(entries.map(\.name))
             let rootProject = names.contains(".git") ? root : nil
+            if let rootProject { repositories.append(rootProject) }
             for entry in entries where entry.isDirectory && !entry.isDataless && !skipped(entry.name) {
                 let path = root + "/" + entry.name
                 let project = rootProject ?? path
@@ -121,18 +168,20 @@ enum BuildCacheScanner {
         let lock = NSLock()
         DispatchQueue.concurrentPerform(iterations: starts.count) { index in
             let start = starts[index]
-            let candidates = walk(start.path, depth: start.depth, project: start.project)
+            let walked = walk(start.path, depth: start.depth, project: start.project)
             lock.lock()
-            found.append(contentsOf: candidates)
+            found.append(contentsOf: walked.candidates)
+            repositories.append(contentsOf: walked.repositories)
             lock.unlock()
         }
-        return found
+        return (found, repositories)
     }
 
     /// Depth-first walk that stops at artifacts, so their contents are never listed here.
-    private static func walk(_ start: String, depth: Int, project: String) -> [Candidate] {
+    private static func walk(_ start: String, depth: Int, project: String) -> (candidates: [Candidate], repositories: [String]) {
         let lister = DirectoryLister()
         var found: [Candidate] = []
+        var repositories: [String] = []
         var stack = [(path: start, depth: depth, project: project)]
         while let current = stack.popLast() {
             guard let entries = lister.list(current.path) else { continue }
@@ -144,6 +193,7 @@ enum BuildCacheScanner {
                 found.append(Candidate(path: current.path, kind: kind, project: current.project, needsIgnoreCheck: false))
                 continue
             }
+            if isRepository { repositories.append(current.path) }
             let project = isRepository ? current.path : current.project
             for entry in entries where entry.isDirectory && !entry.isDataless && !skipped(entry.name) {
                 let path = current.path + "/" + entry.name
@@ -154,7 +204,7 @@ enum BuildCacheScanner {
                 }
             }
         }
-        return found
+        return (found, repositories)
     }
 
     private static let skippedSuffixes = [".app", ".xcodeproj", ".xcworkspace", ".xcassets", ".framework", ".photoslibrary", ".lproj"]
@@ -262,8 +312,9 @@ enum BuildCacheScanner {
         var project = CacheProject(root: root, name: (root as NSString).lastPathComponent, repository: nil, branch: nil,
                                    lastUsed: artifacts.map(\.modified).max() ?? .distantPast, artifacts: artifacts)
         guard let gitDir = gitDirectory(root) else { return project }
-        if let range = gitDir.range(of: "/.git/worktrees/") {
-            project.repository = (String(gitDir[..<range.lowerBound]) as NSString).lastPathComponent
+        if let repository = mainRepository(gitDirectory: gitDir) {
+            project.repositoryRoot = repository
+            project.repository = (repository as NSString).lastPathComponent
         }
         if let head = try? String(contentsOfFile: gitDir + "/HEAD", encoding: .utf8) {
             let trimmed = head.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -272,6 +323,16 @@ enum BuildCacheScanner {
         // Git touches the index on every checkout, commit and status.
         if let index = modified(gitDir + "/index") { project.lastUsed = max(project.lastUsed, index) }
         return project
+    }
+
+    /// The main repository of a linked worktree, from its git directory
+    /// (`<repository>/.git/worktrees/<name>`).
+    private static func mainRepository(gitDirectory: String) -> String? {
+        gitDirectory.range(of: "/.git/worktrees/").map { String(gitDirectory[..<$0.lowerBound]) }
+    }
+
+    static func isLinkedWorktree(_ root: String) -> Bool {
+        gitDirectory(root).flatMap { mainRepository(gitDirectory: $0) } != nil
     }
 
     private static func gitDirectory(_ root: String) -> String? {
@@ -328,6 +389,56 @@ enum BuildCacheScanner {
             }
         }
         return results
+    }
+
+    /// Measures each worktree's own files, leaving out the artifacts and
+    /// nested repositories inside it, which are counted on their own. A
+    /// checkout in `reuse` keeps its size while the worktree's folder and git
+    /// index are unchanged.
+    static func measureCheckouts(_ worktrees: [String], excluding: [String], reuse: [String: WorktreeCheckout] = [:],
+                                 each: () -> Void = {}) -> [String: WorktreeCheckout] {
+        let excluded = excluding.sorted()
+        let lock = NSLock()
+        var next = 0
+        var results: [String: WorktreeCheckout] = [:]
+        let workers = min(4, max(ProcessInfo.processInfo.activeProcessorCount, 1), max(worktrees.count, 1))
+        DispatchQueue.concurrentPerform(iterations: workers) { _ in
+            let sizer = DirectorySizer()
+            while true {
+                lock.lock()
+                let index = next
+                next += 1
+                lock.unlock()
+                guard index < worktrees.count else { return }
+                let root = worktrees[index]
+                let stamp = [modified(root), gitDirectory(root).flatMap { modified($0 + "/index") }].compactMap { $0 }.max()
+                var checkout: WorktreeCheckout?
+                if let previous = reuse[root], let stamp, previous.stamp == stamp {
+                    checkout = previous
+                } else {
+                    let inside = Set(within(root, excluded))
+                    checkout = sizer.measure(root, excluding: inside).map { WorktreeCheckout(reclaimable: $0.reclaimable, stamp: stamp) }
+                }
+                lock.lock()
+                if let checkout { results[root] = checkout }
+                lock.unlock()
+                each()
+            }
+        }
+        return results
+    }
+
+    /// The paths in sorted `paths` that sit below `root`.
+    private static func within(_ root: String, _ paths: [String]) -> ArraySlice<String> {
+        let prefix = root + "/"
+        var low = 0, high = paths.count
+        while low < high {
+            let middle = (low + high) / 2
+            if paths[middle] < prefix { low = middle + 1 } else { high = middle }
+        }
+        var end = low
+        while end < paths.count, paths[end].hasPrefix(prefix) { end += 1 }
+        return paths[low..<end]
     }
 
     // MARK: - Deleting
@@ -462,7 +573,8 @@ private final class DirectorySizer {
 
     deinit { buffer.deallocate() }
 
-    func measure(_ root: String) -> (size: UInt64, reclaimable: UInt64)? {
+    /// Folders in `excluding` are left out, along with everything in them.
+    func measure(_ root: String, excluding: Set<String> = []) -> (size: UInt64, reclaimable: UInt64)? {
         var size: UInt64 = 0, reclaimable: UInt64 = 0
         var linked = Set<UInt64>()
         var stack = [root]
@@ -489,8 +601,9 @@ private final class DirectorySizer {
                     let fileID = field.loadUnaligned(as: UInt64.self)
                     field += 8
                     if type == VDIR.rawValue {
-                        guard flags & UInt32(SF_DATALESS) == 0 else { entry += length; continue }
-                        stack.append(directory + "/" + String(cString: namePointer.assumingMemoryBound(to: CChar.self)))
+                        let path = directory + "/" + String(cString: namePointer.assumingMemoryBound(to: CChar.self))
+                        guard flags & UInt32(SF_DATALESS) == 0, !excluding.contains(path) else { entry += length; continue }
+                        stack.append(path)
                     } else {
                         var links: UInt32 = 1, allocated: UInt64 = 0
                         if returned.fileattr & attrgroup_t(ATTR_FILE_LINKCOUNT) != 0 {

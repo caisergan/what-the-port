@@ -20,6 +20,9 @@ final class BuildCacheStore: ObservableObject {
 
     var isScanning: Bool { progress != nil }
     var reclaimable: UInt64 { projects.reduce(0) { $0 + $1.reclaimable } }
+    /// What the linked worktrees' own files take, on top of their caches.
+    var checkouts: UInt64 { projects.reduce(0) { $0 + $1.checkoutBytes } }
+    var worktreeCount: Int { projects.filter { $0.checkout != nil }.count }
 
     private let queue = DispatchQueue(label: "com.whattheport.caches", qos: .utility)
     private var learnedRoots = Set<String>()
@@ -168,16 +171,19 @@ final class BuildCacheStore: ObservableObject {
         }
         progress = Progress(measured: 0, total: 0)
         let reuse = force ? [:] : Dictionary(projects.flatMap(\.artifacts).map { ($0.path, $0) }) { first, _ in first }
+        let reuseCheckouts = force ? [:] : Dictionary(projects.compactMap { project in project.checkout.map { (project.root, $0) } }) { first, _ in first }
         // A first scan fills the list as it goes; later ones swap in when done.
         let showsPartial = projects.isEmpty
         queue.async {
             let lock = NSLock()
             var measured: [(artifact: BuildArtifact, project: String)] = []
             var published = Date.distantPast
-            let result = BuildCacheScanner.scan(roots: roots, reuse: reuse) { artifact, project, total in
+            var count = 0
+            let result = BuildCacheScanner.scan(roots: roots, reuse: reuse, reuseCheckouts: reuseCheckouts) { measuredArtifact, total in
                 lock.lock()
-                measured.append((artifact, project))
-                let count = measured.count
+                count += 1
+                if let measuredArtifact { measured.append(measuredArtifact) }
+                let progressCount = count
                 let snapshot = Date().timeIntervalSince(published) > 0.3 ? measured : nil
                 if snapshot != nil { published = Date() }
                 lock.unlock()
@@ -185,7 +191,7 @@ final class BuildCacheStore: ObservableObject {
                 let partial = showsPartial ? BuildCacheScanner.group(snapshot) : nil
                 DispatchQueue.main.async {
                     guard self.progress != nil else { return }
-                    self.progress = Progress(measured: count, total: total)
+                    self.progress = Progress(measured: progressCount, total: total)
                     if let partial { self.projects = self.withoutPending(partial) }
                 }
             }
@@ -256,8 +262,8 @@ final class BuildCacheStore: ObservableObject {
         }
         guard !jobs.isEmpty else { return }
         for index in projects.indices { projects[index].artifacts.removeAll { paths.contains($0.path) } }
-        projects.removeAll { $0.artifacts.isEmpty }
-        projects.sort { $0.reclaimable > $1.reclaimable }
+        projects.removeAll { !$0.isListed }
+        projects.sort(by: CacheProject.largerFirst)
         cleanupReset?.cancel()
         // A finished cleanup still on screen makes way for the new one.
         if cleanup?.isFinished ?? true { cleanup = Cleanup() }
@@ -272,7 +278,7 @@ final class BuildCacheStore: ObservableObject {
         guard jobs.count > 2 else { return }
         let paths = Set(jobs.map(\.id))
         for index in projects.indices { projects[index].artifacts.removeAll { paths.contains($0.path) } }
-        projects.removeAll { $0.artifacts.isEmpty }
+        projects.removeAll { !$0.isListed }
         var cleanup = Cleanup(jobs: jobs, fraction: 0.4)
         cleanup.jobs[0].state = .done
         cleanup.jobs[1].state = .deleting
@@ -294,7 +300,7 @@ final class BuildCacheStore: ObservableObject {
                 projects.append(project)
             }
         }
-        projects.sort { $0.reclaimable == $1.reclaimable ? $0.root < $1.root : $0.reclaimable > $1.reclaimable }
+        projects.sort(by: CacheProject.largerFirst)
         save()
     }
 
@@ -344,7 +350,7 @@ final class BuildCacheStore: ObservableObject {
         return projects.compactMap { project in
             var project = project
             project.artifacts.removeAll { pending.contains($0.path) }
-            return project.artifacts.isEmpty ? nil : project
+            return project.isListed ? project : nil
         }
     }
 }
